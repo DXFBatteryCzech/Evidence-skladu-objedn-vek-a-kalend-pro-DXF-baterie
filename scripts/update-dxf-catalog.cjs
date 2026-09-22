@@ -236,6 +236,43 @@ async function main() {
     p.customName = dupCounts.get(k) > 1 && p.series ? base + " " + p.series : base;
   }
 
+
+  // AUDIT DUPLICIT V23
+  const auditKey = p => [
+    p.cells,
+    p.capacity,
+    p.cRating,
+    p.caseType,
+    Number(p.voltage || 0).toFixed(2),
+    String(p.chemistry || ""),
+    String(p.series || "").toLowerCase().replace(/\s+/g," ").trim(),
+    String(p.dimensions || "").toLowerCase().replace(/\s+/g," ").trim()
+  ].join("|");
+  const auditGroups = new Map();
+  for (const p of products) {
+    const k = auditKey(p);
+    if (!auditGroups.has(k)) auditGroups.set(k, []);
+    auditGroups.get(k).push(p);
+  }
+  const duplicateGroups = [...auditGroups.entries()].filter(([,items]) => items.length > 1);
+  console.log("AUDIT_DUPLICATE_GROUPS", duplicateGroups.length);
+  for (const [k,items] of duplicateGroups.slice(0,120)) {
+    console.log("DUPGROUP", k, "COUNT", items.length);
+    for (const p of items) {
+      console.log("DUPITEM", JSON.stringify({
+        name:p.customName,
+        title:p.sourceTitle,
+        price:p.supplierPriceUsd,
+        warehouse:p.sourceWarehouse,
+        handle:p.sourceHandle,
+        series:p.series,
+        dimensions:p.dimensions,
+        connectors:(p.connectors||[]).length,
+        variants:(p.variantPrices||[]).length
+      }));
+    }
+  }
+
   products.sort((a,b) => a.cells-b.cells || a.caseType.localeCompare(b.caseType) || a.capacity-b.capacity || a.cRating-b.cRating || a.customName.localeCompare(b.customName));
   products.forEach((p,i)=>p.sortOrder=i+1);
 
