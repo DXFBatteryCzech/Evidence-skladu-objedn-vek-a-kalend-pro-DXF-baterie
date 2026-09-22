@@ -60,6 +60,134 @@ function parseWeight(html) {
   return m[2].toLowerCase() === "kg" ? Math.round(n * 1000) : Math.round(n);
 }
 
+function connectorsFromText(text) {
+  const t = String(text || "").toUpperCase();
+  const out = [];
+  const add = x => { if (x && !out.includes(x)) out.push(x); };
+  if (/\bXT150\b/.test(t)) add("XT150 PLUG");
+  if (/\bXT90S\b/.test(t)) add("XT90S PLUG");
+  if (/\bXT90\b/.test(t) && !/\bXT90S\b/.test(t)) add("XT90 PLUG");
+  if (/\bXT60\b/.test(t)) add("XT60 PLUG");
+  if (/\bEC5\b/.test(t)) add("EC5 PLUG");
+  if (/\bEC3\b/.test(t)) add("EC3 PLUG");
+  if (/\bIC5\b/.test(t)) add("IC5 PLUG");
+  if (/\bIC3\b/.test(t)) add("IC3 PLUG");
+  if (/\bTRX\b|TRAXXAS/.test(t)) add("TRX PLUG");
+  if (/\bQ8S\b/.test(t)) add("Q8S PLUG");
+  if (/DEANS|T[- ]?PLUG|\bT PLUG\b/.test(t)) add("DEANS/T PLUG");
+  if (/\b5MM\b/.test(t)) add("5MM");
+  if (/\b4MM\b/.test(t)) add("4MM");
+  return out;
+}
+
+function modelIdentityKey(p) {
+  return [
+    Number(p.cells || 0),
+    Number(p.capacity || 0),
+    Number(p.cRating || 0),
+    String(p.caseType || ""),
+    Number(p.voltage || 0).toFixed(2),
+    String(p.chemistry || ""),
+    String(p.series || "").toLowerCase().replace(/\s+/g," ").trim(),
+    String(p.dimensions || "").toLowerCase().replace(/\s+/g," ").trim()
+  ].join("|");
+}
+
+function canonicalScore(p) {
+  let score = 0;
+  if (p.sourceWarehouse === "EUROPE WAREHOUSE") score += 1000;
+  if (p.imageUrl) score += 100;
+  if (p.dimensions) score += 40;
+  if (p.weightG) score += 20;
+  score += Math.min(50,(p.connectors||[]).length * 5);
+  score += Math.min(80,(p.variantPrices||[]).length);
+  const h = String(p.sourceHandle || "");
+  if (/^eudxf-/i.test(h)) score += 30;
+  if (/副本|copy/i.test(h)) score -= 50;
+  if (/-[12]$/.test(h)) score -= 10;
+  return score;
+}
+
+function mergePhysicalDuplicates(products) {
+  const groups = new Map();
+  for (const p of products) {
+    const k = modelIdentityKey(p);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(p);
+  }
+
+  const merged = [];
+  let removed = 0;
+
+  for (const items of groups.values()) {
+    if (items.length === 1) {
+      merged.push(items[0]);
+      continue;
+    }
+
+    const ranked = [...items].sort((a,b)=>canonicalScore(b)-canonicalScore(a));
+    const base = JSON.parse(JSON.stringify(ranked[0]));
+    const connectorSet = new Set();
+    const variantMap = new Map();
+    const sourceUrls = [];
+
+    for (const p of ranked) {
+      (p.connectors||[]).forEach(c=>connectorSet.add(c));
+      connectorsFromText(p.sourceTitle).forEach(c=>connectorSet.add(c));
+      if (p.productUrl) sourceUrls.push(p.productUrl);
+
+      const fallbackConnectors = (p.connectors&&p.connectors.length)
+        ? p.connectors
+        : connectorsFromText(p.sourceTitle);
+      const fallbackConnector = fallbackConnectors.length === 1 ? fallbackConnectors[0] : "";
+
+      for (const v of (p.variantPrices||[])) {
+        const connector = v.connector || fallbackConnector || "";
+        const key = [connector,Number(v.qty||1),v.warehouse||p.sourceWarehouse||""].join("|");
+        const candidate = {...v,connector};
+        if (!variantMap.has(key)) {
+          variantMap.set(key,candidate);
+        } else {
+          const existing = variantMap.get(key);
+          // Při skutečné duplicitě stejného konektoru/počtu držíme cenu z kanonické stránky.
+          // Nižší/vyšší cenu z další staré kopie nepromícháváme.
+          if (p.id === base.id) variantMap.set(key,candidate);
+          else if (!existing.totalUsd && candidate.totalUsd) variantMap.set(key,candidate);
+        }
+      }
+    }
+
+    base.connectors = [...connectorSet];
+    base.sourceUrls = [...new Set(sourceUrls)];
+    base.mergedDuplicateCount = items.length;
+    base.variantPrices = [...variantMap.values()];
+
+    if (!base.primaryConnector || !base.connectors.includes(base.primaryConnector)) {
+      const priority = ["XT60 PLUG","XT90 PLUG","EC5 PLUG","DEANS/T PLUG","TRX PLUG","XT150 PLUG","Q8S PLUG","XT90S PLUG"];
+      base.primaryConnector = priority.find(c=>base.connectors.includes(c)) || base.connectors[0] || "";
+    }
+
+    let primaryVariants = base.variantPrices.filter(v=>!base.primaryConnector || v.connector===base.primaryConnector);
+    if (!primaryVariants.length) primaryVariants = base.variantPrices;
+    const one = primaryVariants.find(v=>Number(v.qty)===1) || primaryVariants.sort((a,b)=>Number(a.qty)-Number(b.qty))[0];
+    if (one) base.supplierPriceUsd = Number((Number(one.totalUsd)/Math.max(1,Number(one.qty||1))).toFixed(2));
+
+    const tierMap = new Map();
+    for (const v of primaryVariants) {
+      const q=Math.max(1,Number(v.qty||1)), total=Number(v.totalUsd||0);
+      if (total>0 && !tierMap.has(q)) tierMap.set(q,total);
+    }
+    if (tierMap.size) base.priceTiers=[...tierMap.entries()].sort((a,b)=>a[0]-b[0]).map(([qty,totalUsd])=>({qty,totalUsd}));
+
+    merged.push(base);
+    removed += items.length - 1;
+  }
+
+  console.log("DEDUP_REMOVED", removed, "FROM", products.length, "TO", merged.length);
+  return merged;
+}
+
+
 function optionIndex(product, re) {
   const opts = Array.isArray(product?.options) ? product.options : [];
   return opts.findIndex(o => re.test(String(typeof o === "string" ? o : o?.name || "")));
@@ -109,7 +237,8 @@ async function enrichProduct(p) {
     warehouse = "DXF GLOBAL";
   }
 
-  const connectors = [...new Set(euVariants.map(v => optionValue(v, connectorIdx)).filter(Boolean).filter(x => !/warehouse/i.test(x)))];
+  let connectors = [...new Set(euVariants.map(v => optionValue(v, connectorIdx)).filter(Boolean).filter(x => !/warehouse/i.test(x)))];
+  if (!connectors.length) connectors = connectorsFromText(title);
 
   const variantPrices = euVariants.map(v => {
     const label = [v.title, v.option1, v.option2, v.option3].filter(Boolean).join(" ");
@@ -118,7 +247,7 @@ async function enrichProduct(p) {
     return {
       id: String(v.id || ""),
       title: String(v.title || ""),
-      connector: optionValue(v, connectorIdx),
+      connector: optionValue(v, connectorIdx) || (connectors.length===1 ? connectors[0] : ""),
       warehouse,
       qty,
       totalUsd,
@@ -212,7 +341,7 @@ async function main() {
   const byHandle = new Map();
   for (const p of collected) if (p?.handle) byHandle.set(p.handle, p);
 
-  const products = [];
+  let products = [];
   let i = 0;
   for (const p of byHandle.values()) {
     i++;
@@ -225,6 +354,8 @@ async function main() {
     if (i % 20 === 0) await sleep(250);
   }
 
+  products = mergePhysicalDuplicates(products);
+
   const dupCounts = new Map();
   for (const p of products) {
     const k = [p.cells,p.capacity,p.cRating,p.caseType].join("|");
@@ -236,42 +367,6 @@ async function main() {
     p.customName = dupCounts.get(k) > 1 && p.series ? base + " " + p.series : base;
   }
 
-
-  // AUDIT DUPLICIT V23
-  const auditKey = p => [
-    p.cells,
-    p.capacity,
-    p.cRating,
-    p.caseType,
-    Number(p.voltage || 0).toFixed(2),
-    String(p.chemistry || ""),
-    String(p.series || "").toLowerCase().replace(/\s+/g," ").trim(),
-    String(p.dimensions || "").toLowerCase().replace(/\s+/g," ").trim()
-  ].join("|");
-  const auditGroups = new Map();
-  for (const p of products) {
-    const k = auditKey(p);
-    if (!auditGroups.has(k)) auditGroups.set(k, []);
-    auditGroups.get(k).push(p);
-  }
-  const duplicateGroups = [...auditGroups.entries()].filter(([,items]) => items.length > 1);
-  console.log("AUDIT_DUPLICATE_GROUPS", duplicateGroups.length);
-  for (const [k,items] of duplicateGroups.slice(0,120)) {
-    console.log("DUPGROUP", k, "COUNT", items.length);
-    for (const p of items) {
-      console.log("DUPITEM", JSON.stringify({
-        name:p.customName,
-        title:p.sourceTitle,
-        price:p.supplierPriceUsd,
-        warehouse:p.sourceWarehouse,
-        handle:p.sourceHandle,
-        series:p.series,
-        dimensions:p.dimensions,
-        connectors:(p.connectors||[]).length,
-        variants:(p.variantPrices||[]).length
-      }));
-    }
-  }
 
   products.sort((a,b) => a.cells-b.cells || a.caseType.localeCompare(b.caseType) || a.capacity-b.capacity || a.cRating-b.cRating || a.customName.localeCompare(b.customName));
   products.forEach((p,i)=>p.sortOrder=i+1);
