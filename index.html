@@ -761,7 +761,7 @@ html[data-theme="dark"] .showcase-next-event{border-style:solid}
 
 
 <section id="finance" class="view">
- <div class="top"><div><div class="eyebrow">FINANCE V22.4</div><h1>Finance</h1><p>Skutečný pohyb peněz odvozený z objednávek. Ruční pohyby zůstávají zachované jako doplňková evidence.</p></div><div class="actions"><button class="btn" type="button" onclick="openMoneyDialog()">+ Ruční pohyb</button><button class="btn primary" type="button" onclick="renderFinanceV20()">Obnovit přehled</button></div></div>
+ <div class="top"><div><div class="eyebrow">FINANCE V22.5</div><h1>Finance</h1><p>Skutečný pohyb peněz odvozený z objednávek. Ruční pohyby zůstávají zachované jako doplňková evidence.</p></div><div class="actions"><button class="btn" type="button" onclick="openMoneyDialog()">+ Ruční pohyb</button><button class="btn primary" type="button" onclick="renderFinanceV20()">Obnovit přehled</button></div></div>
  <div class="finance-filterbar panel"><div class="toolbar"><select id="financePeriod" onchange="renderFinanceV20()"><option value="all">Celá historie</option><option value="month">Tento měsíc</option><option value="prevMonth">Minulý měsíc</option><option value="year">Tento rok</option></select><select id="financeMovementFilter" onchange="renderFinanceV20()"><option value="all">Všechny pohyby</option><option value="customer">Platby zákazníků</option><option value="dxf">Platby DXF</option><option value="manual">Ruční pohyby</option></select><input id="financeSearch" placeholder="Objednávka, klient, poznámka…" oninput="renderFinanceV20()"></div><div id="financeCompleteness" class="finance-completeness"></div></div>
  <div class="finance-kpis">
   <article class="finance-kpi cash"><small>Reálný stav účtu</small><strong id="finCash">0 Kč</strong><span id="finCashSub">Po všech potvrzených příjmech a výdajích</span></article>
@@ -5090,7 +5090,7 @@ function buildFinance221(){
     if(dt||o.dxfPaymentStatus==='Zaplaceno'){
       const amount=dt?Math.abs(N(dt._amount)):cost;
       if(dt&&isActive&&o.dxfPaymentStatus==='Zaplaceno'&&cost>0&&Math.abs(amount-cost)>1)conflicts.push((o.number||'Objednávka')+': DXF platba '+C(amount)+' ≠ náklad '+C(cost));
-      if(amount>0)events.push({id:'order:'+o.id+':dxf',source:'order',kind:'dxf',entityId:o.id,date:D(dt?dt._date:(o.dxfPaidAt||o.updatedAt||o.createdAt||o.date)),amount:-amount,accountImpact:0,customer:orderClient221(o),title:(o.number||'Objednávka')+' · '+orderClient221(o),sub:'Platba DXF',orderId:o.id,storno:!isActive})
+      if(amount>0)events.push({id:'order:'+o.id+':dxf',source:'order',kind:'dxf',entityId:o.id,date:D(dt?dt._date:(o.dxfPaidAt||o.updatedAt||o.createdAt||o.date)),amount:-amount,accountImpact:-amount,customer:orderClient221(o),title:(o.number||'Objednávka')+' · '+orderClient221(o),sub:'Platba DXF',orderId:o.id,storno:!isActive})
     }
   }
   const links=linkedServiceMovements();
@@ -5099,7 +5099,7 @@ function buildFinance221(){
     if(mi){events.push({id:'service:'+s.id+':income',source:'service',kind:'service_customer',entityId:s.id,date:D(mi.date||mi.createdAt||s.date),amount:Math.abs(N(mi.amount)),accountImpact:Math.abs(N(mi.amount)),customer:serviceClient221(s),title:serviceClient221(s)+' · '+(s.rcName||'RC servis'),sub:'Příjem ze servisu',serviceId:s.id})}
     else if(ct||s.paymentStatus==='Zaplaceno'){events.push({id:'service:'+s.id+':income',source:'service',kind:'service_customer',entityId:s.id,date:D(ct?ct._date:(s.customerPaidAt||s.updatedAt||s.date)),amount:ct?Math.abs(N(ct._amount)):total,accountImpact:ct?Math.abs(N(ct._amount)):total,customer:serviceClient221(s),title:serviceClient221(s)+' · '+(s.rcName||'RC servis'),sub:'Příjem ze servisu',serviceId:s.id})}
     if(mo){events.push({id:'service:'+s.id+':cost',source:'service',kind:'service_cost',entityId:s.id,date:D(mo.date||mo.createdAt||s.date),amount:-Math.abs(N(mo.amount)),accountImpact:-Math.abs(N(mo.amount)),customer:serviceClient221(s),title:serviceClient221(s)+' · '+(s.rcName||'RC servis'),sub:'Náklady servisu',serviceId:s.id})}
-    else if(dt||s.costPaymentStatus==='Zaplaceno'){const a=dt?Math.abs(N(dt._amount)):cost;if(a>0)events.push({id:'service:'+s.id+':cost',source:'service',kind:'service_cost',entityId:s.id,date:D(dt?dt._date:(s.serviceCostPaidAt||s.updatedAt||s.date)),amount:-a,accountImpact:0,customer:serviceClient221(s),title:serviceClient221(s)+' · '+(s.rcName||'RC servis'),sub:'Náklady servisu',serviceId:s.id})}
+    else if(dt||s.costPaymentStatus==='Zaplaceno'){const a=dt?Math.abs(N(dt._amount)):cost;if(a>0)events.push({id:'service:'+s.id+':cost',source:'service',kind:'service_cost',entityId:s.id,date:D(dt?dt._date:(s.serviceCostPaidAt||s.updatedAt||s.date)),amount:-a,accountImpact:-a,customer:serviceClient221(s),title:serviceClient221(s)+' · '+(s.rcName||'RC servis'),sub:'Náklady servisu',serviceId:s.id})}
   }
   for(const m of (state.moneyMovements||[])){
     if(links.used.has(m.id)||isExplicitAutoMove(m)||m.movementKind==='profit')continue;
@@ -5187,7 +5187,7 @@ function renderKpis221(data,r){
   const dueDxf=active.filter(o=>orderCost221(o)>0&&o.dxfPaymentStatus==='Čeká na platbu'&&!txkeys.has('order|'+o.id+'|dxf')),dxfDue=dueDxf.reduce((a,o)=>a+orderCost221(o),0);
   const links=linkedServiceMovements(),dueServiceCost=(state.rcServices||[]).filter(s=>serviceCost221(s)>0&&s.costPaymentStatus==='Čeká na platbu'&&!txkeys.has('service|'+s.id+'|service_cost')&&!links.out.has(s.id)),serviceCostDue=dueServiceCost.reduce((a,s)=>a+serviceCost221(s),0);
   const periodOrders=active.filter(o=>inR(o.date,r)),periodServices=(state.rcServices||[]).filter(s=>inR(s.date,r)),profit=periodOrders.reduce((a,o)=>a+(saleTotal(o)-N(o.shipping)-orderCost221(o)),0)+periodServices.reduce((a,s)=>a+N(s.profit),0);
-  set('finCash',C(balance));set('finCashSub','Stav účtu = počáteční vklady + skutečně přijaté platby +/− ručně zapsané pohyby. DXF náklad se z účtu automaticky neodečítá.');
+  set('finCash',C(balance));set('finCashSub','Stav účtu = počáteční vklad + přijaté platby − skutečně zaplacené DXF a servisní náklady +/− ruční pohyby.');
   set('finCustomerPaid',C(customerEvents.reduce((a,e)=>a+Math.max(0,e.amount),0)));set('finCustomerPaidSub',customerEvents.length+' skutečně zaznamenaných plateb');
   set('finDxfPaid','− '+C(Math.abs(dxfEvents.reduce((a,e)=>a+Math.min(0,e.amount),0))));set('finDxfPaidSub',dxfEvents.length+' zaplacených DXF plateb');
   set('finServicePaid',C(serviceIn.reduce((a,e)=>a+Math.max(0,e.amount),0)));set('finServicePaidSub',serviceIn.length+' servisních příjmů');
@@ -5273,7 +5273,7 @@ setTimeout(financeV221Render,60);
 <script id="dxf-v223-account-balance">
 (function(){
   const h=document.querySelector('#finance .finance-ledger-panel .hint');
-  if(h)h.textContent='Příjem a DXF náklad jsou vedle sebe pro kontrolu zisku. Sloupec Zůstatek ale ukazuje jen skutečný stav sledovaného účtu.';
+  if(h)h.textContent='Sloupec Zůstatek ukazuje skutečný stav účtu po každém pohybu: počáteční vklad + příjmy − zaplacené DXF/servisní výdaje +/− ruční pohyby.';
 })();
 </script>
 
@@ -5282,6 +5282,14 @@ setTimeout(financeV221Render,60);
 (function(){
   const h=document.querySelector('#finance .finance-ledger-panel .hint');
   if(h)h.textContent='Zůstatek je stav účtu po konkrétním pohybu. U více plateb ve stejný den se řádky řadí stabilně podle času platby, případně podle čísla objednávky.';
+})();
+</script>
+
+
+<script id="dxf-v225-real-account-balance">
+(function(){
+  const h=document.querySelector('#finance .finance-ledger-panel .hint');
+  if(h)h.textContent='Reálný stav účtu: počáteční vklad + přijaté platby − skutečně zaplacené DXF a servisní náklady +/− ruční pohyby.';
 })();
 </script>
 
