@@ -212,6 +212,31 @@ async function main() {
   products.sort((a,b) => a.cells-b.cells || a.caseType.localeCompare(b.caseType) || a.capacity-b.capacity || a.cRating-b.cRating || a.customName.localeCompare(b.customName));
   products.forEach((p,i)=>p.sortOrder=i+1);
 
+  const missingUrl = products.filter(p => !p.productUrl);
+  const missingImage = products.filter(p => !p.imageUrl);
+  const missingPrice = products.filter(p => !(Number(p.supplierPriceUsd) > 0));
+  if (missingUrl.length || missingImage.length || missingPrice.length) {
+    throw new Error(
+      "Kontrola kvality katalogu selhala: URL " + missingUrl.length +
+      ", fotografie " + missingImage.length +
+      ", cena " + missingPrice.length
+    );
+  }
+
+  const sample3s7500 = products.find(p =>
+    p.cells === 3 && p.capacity === 7500 && p.cRating === 150 &&
+    p.caseType === "Hardcase" && /HV/i.test(p.sourceTitle || "")
+  );
+  if (!sample3s7500) {
+    throw new Error("Kontrolní produkt 3S 7500mAh 150C Hardcase HV nebyl nalezen.");
+  }
+  if (Math.abs(Number(sample3s7500.voltage) - 11.4) > 0.01 || !sample3s7500.productUrl || !sample3s7500.imageUrl) {
+    throw new Error("Kontrolní produkt 3S 7500mAh 150C nemá kompletní aktuální data.");
+  }
+  if (Math.abs(Number(sample3s7500.supplierPriceUsd) - 63) > 0.02) {
+    throw new Error("Kontrola ceny 3S 7500mAh 150C selhala: " + sample3s7500.supplierPriceUsd + " USD místo 63.00 USD");
+  }
+
   const known = products.find(p => p.sourceHandle === "dxf-2s-shorty-lipo-battery-7-4v-140c-5200mah-5mm-t-plug-hardcase-1-6-pack-options-available");
   if (!known) {
     throw new Error("Kontrolní produkt 2S Shorty 5200mAh 140C nebyl v aktuálním DXF katalogu nalezen.");
