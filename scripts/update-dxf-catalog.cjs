@@ -149,6 +149,24 @@ async function enrichProduct(p) {
     imageUrl = typeof x === "string" ? x : x?.src || "";
   }
 
+  // Některé aktivní produkty nemají fotografii v globálním products.json feedu.
+  // Jen u těchto výjimek sáhneme na detail produktu, aby katalog nezůstal bez fotky.
+  if (!imageUrl) {
+    try {
+      await sleep(220);
+      const detail = await fetchJson(BASE + "/products/" + encodeURIComponent(handle) + ".js");
+      const dfi = detail?.featured_image;
+      if (typeof dfi === "string") imageUrl = dfi.startsWith("//") ? "https:" + dfi : dfi;
+      else if (dfi?.src) imageUrl = dfi.src;
+      if (!imageUrl && Array.isArray(detail?.images) && detail.images.length) {
+        const x = detail.images[0];
+        imageUrl = typeof x === "string" ? (x.startsWith("//") ? "https:" + x : x) : x?.src || "";
+      }
+    } catch (e) {
+      console.warn("Chybějící fotografie pro", handle, e.message);
+    }
+  }
+
   const body = p.body_html || full.description || "";
   const dimensions = parseDimensions(body);
   const weightG = parseWeight(body);
