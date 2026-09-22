@@ -5755,6 +5755,7 @@ setTimeout(financeV221Render,60);
 
   const RAW_URL="https://raw.githubusercontent.com/DXFBatteryCzech/Evidence-skladu-objedn-vek-a-kalend-pro-DXF-baterie/main/dxf-catalog.json";
   let liveCatalog=[];
+  let liveReady=false;
   let generatedAt="";
   window.__DXFLiveCatalogV23=liveCatalog;
 
@@ -5782,8 +5783,8 @@ setTimeout(financeV221Render,60);
   }
 
   catalogProductsV11=function(includeHidden=false){
-    const live=liveProducts(includeHidden);
-    return live.length?live:(legacyProducts?legacyProducts(includeHidden):[]);
+    if(!liveReady)return [];
+    return liveProducts(includeHidden);
   };
   window.catalogProductsV11=catalogProductsV11;
 
@@ -6049,6 +6050,7 @@ setTimeout(financeV221Render,60);
     try{
       const data=await fetchCatalogJson(force);
       liveCatalog=data.products.map(p=>({...p,isCustom:false}));
+      liveReady=true;
       window.__DXFLiveCatalogV23=liveCatalog;
       generatedAt=data.generatedAt||"";
       state.catalogMode="live-v23";
@@ -6061,9 +6063,12 @@ setTimeout(financeV221Render,60);
       if(force&&typeof showCloudToast==="function")showCloudToast("Aktuální DXF katalog načten: "+liveCatalog.length+" baterií"+(remapped?" · přemapovaný sklad "+remapped+" položek":"")+".");
     }catch(e){
       console.error("DXF V23 live catalog",e);
-      updateCatalogMeta(legacyProducts?legacyProducts().length:0);
-      if(grid)grid.insertAdjacentHTML("afterbegin",'<div class="safe-banner" style="margin-bottom:12px">Aktuální DXF katalog se nepodařilo načíst. Dočasně používám starý katalog jako zálohu.</div>');
-      try{window.renderCatalog()}catch{}
+      liveReady=false;
+      liveCatalog=[];
+      window.__DXFLiveCatalogV23=liveCatalog;
+      updateCatalogMeta(0);
+      if(grid)grid.innerHTML='<div class="empty"><b>Aktuální DXF katalog se nepodařilo načíst.</b><br>Starý katalog záměrně nezobrazuji, aby se nepoužívaly neaktuální ceny a produkty.<br><button class="btn" type="button" id="v23RetryCatalog" style="margin-top:10px">Zkusit načíst znovu</button></div>';
+      document.getElementById("v23RetryCatalog")?.addEventListener("click",()=>loadLiveCatalog(true));
     }
   }
 
