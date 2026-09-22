@@ -90,14 +90,9 @@ async function fetchCollection(handle) {
 async function enrichProduct(p) {
   const handle = p.handle;
   if (!handle) return null;
-  let full = p;
-  try {
-    full = await fetchJson(BASE + "/products/" + encodeURIComponent(handle) + ".js");
-  } catch (e) {
-    console.warn("Product .js fallback for", handle, e.message);
-  }
+  const full = p;
 
-  const title = String(full.title || p.title || "");
+  const title = String(p.title || "");
   const specs = parseSpecs(title);
   if (!specs.cells || !specs.capacity || !specs.cRating || specs.caseType === "Jiné") return null;
   if (!/battery|lipo|lihv/i.test(title)) return null;
@@ -219,6 +214,11 @@ async function main() {
 
   products.sort((a,b) => a.cells-b.cells || a.caseType.localeCompare(b.caseType) || a.capacity-b.capacity || a.cRating-b.cRating || a.customName.localeCompare(b.customName));
   products.forEach((p,i)=>p.sortOrder=i+1);
+
+  const known = products.find(p => p.sourceHandle === "dxf-2s-shorty-lipo-battery-7-4v-140c-5200mah-5mm-t-plug-hardcase-1-6-pack-options-available");
+  if (known && known.sourceWarehouse === "EUROPE WAREHOUSE" && Math.abs(Number(known.supplierPriceUsd) - 51.04) > 0.02) {
+    throw new Error("Kontrola Europe Warehouse selhala u 2S 5200 140C: " + known.supplierPriceUsd + " USD místo 51.04 USD");
+  }
 
   const out = {
     schemaVersion: 23,
