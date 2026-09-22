@@ -1,7 +1,7 @@
 const fs = require("fs");
 
 const BASE = "https://dxf-hobby.store";
-const COLLECTIONS = ["softcase", "hardcase"];
+const COLLECTIONS = ["dxf-brand", "softcase", "hardcase"];
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const clean = s => String(s ?? "").replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/\s+/g, " ").trim();
@@ -216,7 +216,13 @@ async function main() {
   products.forEach((p,i)=>p.sortOrder=i+1);
 
   const known = products.find(p => p.sourceHandle === "dxf-2s-shorty-lipo-battery-7-4v-140c-5200mah-5mm-t-plug-hardcase-1-6-pack-options-available");
-  if (known && known.sourceWarehouse === "EUROPE WAREHOUSE" && Math.abs(Number(known.supplierPriceUsd) - 51.04) > 0.02) {
+  if (!known) {
+    throw new Error("Kontrolní produkt 2S Shorty 5200mAh 140C nebyl v aktuálním DXF katalogu nalezen.");
+  }
+  if (known.sourceWarehouse !== "EUROPE WAREHOUSE") {
+    throw new Error("Kontrolní produkt 2S Shorty 5200mAh 140C nemá zvolený EUROPE WAREHOUSE: " + known.sourceWarehouse);
+  }
+  if (Math.abs(Number(known.supplierPriceUsd) - 51.04) > 0.02) {
     throw new Error("Kontrola Europe Warehouse selhala u 2S 5200 140C: " + known.supplierPriceUsd + " USD místo 51.04 USD");
   }
 
