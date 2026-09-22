@@ -1,7 +1,7 @@
 const fs = require("fs");
 
 const BASE = "https://dxf-hobby.store";
-const COLLECTIONS = ["dxf-brand", "softcase", "hardcase"];
+const COLLECTIONS = ["ALL ACTIVE PRODUCTS"];
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const clean = s => String(s ?? "").replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/\s+/g, " ").trim();
@@ -75,12 +75,13 @@ async function fetchJson(url) {
   return res.json();
 }
 
-async function fetchCollection(handle) {
+async function fetchAllProducts() {
   const out = [];
-  for (let page = 1; page <= 10; page++) {
-    const url = BASE + "/collections/" + handle + "/products.json?limit=250&page=" + page;
+  for (let page = 1; page <= 20; page++) {
+    const url = BASE + "/products.json?limit=250&page=" + page;
     const json = await fetchJson(url);
     const products = Array.isArray(json?.products) ? json.products : [];
+    console.log("global products page", page, products.length);
     out.push(...products);
     if (products.length < 250) break;
   }
@@ -178,12 +179,8 @@ async function enrichProduct(p) {
 }
 
 async function main() {
-  const collected = [];
-  for (const c of COLLECTIONS) {
-    const products = await fetchCollection(c);
-    console.log(c, products.length);
-    collected.push(...products);
-  }
+  const collected = await fetchAllProducts();
+  console.log("all active products", collected.length);
 
   const byHandle = new Map();
   for (const p of collected) if (p?.handle) byHandle.set(p.handle, p);
