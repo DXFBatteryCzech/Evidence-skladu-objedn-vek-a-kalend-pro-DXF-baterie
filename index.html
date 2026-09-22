@@ -2281,88 +2281,81 @@ function normalizeCloudState(data){
   result.catalogOverrides=result.catalogOverrides||{};
   return result;
 }
+
+/* DXF V22 SAFE: non-destructive cloud sync + snapshots */
+const DXF_SAFE_SNAPSHOT_INDEX=KEY+':safe-snapshots';
+function dxfSafeParse(raw,fallback=null){try{return JSON.parse(raw)}catch{return fallback}}
+function dxfSafeRecordTime(x){const raw=x?.updatedAt||x?.updated_at||x?.modifiedAt||x?.createdAt||x?.created_at||x?.date||'';const t=Date.parse(raw);return Number.isFinite(t)?t:0}
+function dxfSafeSnapshot(reason='save'){
+  try{
+    const raw=localStorage.getItem(KEY);if(!raw)return;
+    const cur=dxfSafeParse(raw);if(!cur)return;
+    let idx=dxfSafeParse(localStorage.getItem(DXF_SAFE_SNAPSHOT_INDEX),[])||[];
+    const signature=raw.length+':'+(cur.orders?.length||0)+':'+(cur.moneyMovements?.length||0)+':'+(cur.financeTransactions?.length||0);
+    if(idx[0]?.signature===signature)return;
+    const key=KEY+':snapshot:'+Date.now();localStorage.setItem(key,raw);
+    idx.unshift({key,at:new Date().toISOString(),reason,orders:cur.orders?.length||0,money:cur.moneyMovements?.length||0,finance:cur.financeTransactions?.length||0,signature});
+    while(idx.length>10){const old=idx.pop();try{localStorage.removeItem(old.key)}catch{}}
+    localStorage.setItem(DXF_SAFE_SNAPSHOT_INDEX,JSON.stringify(idx));
+  }catch(e){console.warn('Snapshot se nepodařilo uložit',e)}
+}
+function dxfSafeMergeList(localList,remoteList){
+  const out=new Map();
+  for(const item of (remoteList||[])){if(!item||typeof item!=='object')continue;const id=item.id||item.number||JSON.stringify(item);out.set(id,item)}
+  for(const item of (localList||[])){
+    if(!item||typeof item!=='object')continue;
+    const id=item.id||item.number||JSON.stringify(item),prev=out.get(id);
+    if(!prev){out.set(id,item);continue}
+    const lt=dxfSafeRecordTime(item),rt=dxfSafeRecordTime(prev);
+    out.set(id,lt>=rt?{...prev,...item}:{...item,...prev});
+  }
+  return [...out.values()]
+}
+function dxfSafeMergeState(localState,remoteState){
+  const l=(localState&&typeof localState==='object')?localState:{},r=(remoteState&&typeof remoteState==='object')?remoteState:{},merged={...r,...l};
+  ['orders','clients','moneyMovements','financeTransactions','rcServices','complaints','simpleNotes','customCatalog','calendarEvents','auditLog','stock'].forEach(k=>merged[k]=dxfSafeMergeList(l[k],r[k]));
+  merged.settings={...(r.settings||{}),...(l.settings||{})};
+  merged.migrations={...(r.migrations||{}),...(l.migrations||{})};
+  merged.catalogOverrides={...(r.catalogOverrides||{}),...(l.catalogOverrides||{})};
+  merged.hiddenCatalogIds=[...new Set([...(r.hiddenCatalogIds||[]),...(l.hiddenCatalogIds||[])])];
+  merged.__safe={...(r.__safe||{}),...(l.__safe||{}),lastMergeAt:new Date().toISOString(),version:22};
+  return normalizeCloudState(merged)
+}
+window.dxfSafeMergeState=dxfSafeMergeState;
+function dxfSafeCounts(x){return{orders:x?.orders?.length||0,money:x?.moneyMovements?.length||0,finance:x?.financeTransactions?.length||0,clients:x?.clients?.length||0}}
 async function loadCloudState(user,{silent=false}={}){
-  if(!user)return;
-  if(!silent)setSyncStatus("Načítám data…","busy");
-  const {data,error}=await cloudClient
-    .from("dxf_app_state")
-    .select("data,updated_at")
-    .eq("user_id",user.id)
-    .maybeSingle();
-
-  if(error){
-    setSyncStatus("Chyba databáze","error");
-    if(!silent)showCloudToast("Databáze není připravená. Spusť SQL soubor v Supabase.");
-    throw error;
-  }
-
+  if(!user)return;if(!silent)setSyncStatus("Načítám data…","busy");
+  const {data,error}=await cloudClient.from("dxf_app_state").select("data,updated_at").eq("user_id",user.id).maybeSingle();
+  if(error){setSyncStatus("Chyba databáze","error");if(!silent)showCloudToast("Databázi se nepodařilo načíst. Lokální data zůstala zachovaná.");throw error}
   if(data?.data){
-    cloudApplyingRemote=true;
-    state=normalizeCloudState(data.data);
-    localStorage.setItem(KEY,JSON.stringify(state));
-    lastCloudUpdatedAt=data.updated_at||null;
-    renderAll();
-    cloudApplyingRemote=false;
-    setSyncStatus("Data jsou synchronizovaná","ok");
-  }else{
-    await pushCloudState(true);
-    if(!silent)showCloudToast("Místní data byla poprvé nahrána do cloudu.");
-  }
+    dxfSafeSnapshot('před načtením cloudu');const before=dxfSafeCounts(state),remote=dxfSafeCounts(data.data);
+    cloudApplyingRemote=true;state=dxfSafeMergeState(state,data.data);localStorage.setItem(KEY,JSON.stringify(state));lastCloudUpdatedAt=data.updated_at||null;renderAll();cloudApplyingRemote=false;
+    if(remote.orders<before.orders)showCloudToast("Cloud měl méně objednávek. Data byla sloučena a místní objednávky zůstaly zachované.");
+    setSyncStatus("Data jsou bezpečně sloučená","ok");await pushCloudState(true);
+  }else{await pushCloudState(true);if(!silent)showCloudToast("Místní data byla poprvé nahrána do cloudu.")}
 }
 async function pushCloudState(initial=false){
-  if(!cloudUser||!cloudReady||cloudApplyingRemote)return;
-  clearTimeout(cloudSaveTimer);
-  setSyncStatus("Ukládám…","busy");
-  const payload={user_id:cloudUser.id,data:state};
-  const {data,error}=await cloudClient
-    .from("dxf_app_state")
-    .upsert(payload,{onConflict:"user_id"})
-    .select("updated_at")
-    .single();
-
-  if(error){
-    setSyncStatus("Neuloženo – zkusím znovu","error");
-    if(!initial)showCloudToast("Cloudové uložení selhalo. Lokální kopie zůstala zachovaná.");
-    return;
-  }
-  lastCloudUpdatedAt=data?.updated_at||new Date().toISOString();
-  setSyncStatus("Uloženo online","ok");
+  if(!cloudUser||!cloudReady||cloudApplyingRemote)return;clearTimeout(cloudSaveTimer);setSyncStatus("Bezpečně ukládám…","busy");
+  let remote=null;try{const read=await cloudClient.from("dxf_app_state").select("data,updated_at").eq("user_id",cloudUser.id).maybeSingle();if(!read.error)remote=read.data}catch(e){console.warn(e)}
+  if(remote?.data){const lc=dxfSafeCounts(state),rc=dxfSafeCounts(remote.data);state=dxfSafeMergeState(state,remote.data);localStorage.setItem(KEY,JSON.stringify(state));if(rc.orders>lc.orders&&!initial)showCloudToast("V cloudu byly další objednávky; zachoval jsem je.")}
+  state.__safe={...(state.__safe||{}),lastPushAt:new Date().toISOString(),version:22};
+  const {data,error}=await cloudClient.from("dxf_app_state").upsert({user_id:cloudUser.id,data:state},{onConflict:"user_id"}).select("updated_at").single();
+  if(error){setSyncStatus("Neuloženo – lokální kopie je v bezpečí","error");if(!initial)showCloudToast("Cloudové uložení selhalo. Lokální data zůstávají zachovaná.");return}
+  lastCloudUpdatedAt=data?.updated_at||new Date().toISOString();setSyncStatus("Bezpečně uloženo online","ok");
 }
-save=function(){
-  localStorage.setItem(KEY,JSON.stringify(state));
-  renderAll();
-  if(cloudReady&&!cloudApplyingRemote){
-    clearTimeout(cloudSaveTimer);
-    cloudSaveTimer=setTimeout(()=>pushCloudState(false),450);
-  }
-};
+save=function(){dxfSafeSnapshot('před změnou');localStorage.setItem(KEY,JSON.stringify(state));renderAll();if(cloudReady&&!cloudApplyingRemote){clearTimeout(cloudSaveTimer);cloudSaveTimer=setTimeout(()=>pushCloudState(false),650)}};
 async function pullCloudIfNewer(showNotice=false){
-  if(!cloudUser||!cloudReady)return;
-  setSyncStatus("Kontroluji změny…","busy");
-  const {data,error}=await cloudClient
-    .from("dxf_app_state")
-    .select("data,updated_at")
-    .eq("user_id",cloudUser.id)
-    .maybeSingle();
-  if(error){setSyncStatus("Chyba připojení","error");return}
-  if(data?.updated_at && (!lastCloudUpdatedAt || new Date(data.updated_at)>new Date(lastCloudUpdatedAt))){
-    cloudApplyingRemote=true;
-    state=normalizeCloudState(data.data);
-    localStorage.setItem(KEY,JSON.stringify(state));
-    lastCloudUpdatedAt=data.updated_at;
-    renderAll();
-    cloudApplyingRemote=false;
-    if(showNotice)showCloudToast("Načtena novější data z cloudu.");
+  if(!cloudUser||!cloudReady)return;setSyncStatus("Kontroluji změny…","busy");
+  const {data,error}=await cloudClient.from("dxf_app_state").select("data,updated_at").eq("user_id",cloudUser.id).maybeSingle();
+  if(error){setSyncStatus("Chyba připojení – lokální data zachována","error");return}
+  if(data?.data&&data?.updated_at&&(!lastCloudUpdatedAt||new Date(data.updated_at)>new Date(lastCloudUpdatedAt))){
+    dxfSafeSnapshot('před synchronizací');cloudApplyingRemote=true;state=dxfSafeMergeState(state,data.data);localStorage.setItem(KEY,JSON.stringify(state));lastCloudUpdatedAt=data.updated_at;renderAll();cloudApplyingRemote=false;if(showNotice)showCloudToast("Cloudová data byla bezpečně sloučena.")
   }
-  setSyncStatus("Data jsou synchronizovaná","ok");
+  setSyncStatus("Data jsou synchronizovaná","ok")
 }
-async function manualCloudRefresh(){
-  await pullCloudIfNewer(true);
-}
-async function cloudLogout(){
-  await pushCloudState(false);
-  await cloudClient.auth.signOut();
-}
+async function manualCloudRefresh(){await pullCloudIfNewer(true)}
+async function cloudLogout(){await pushCloudState(false);await cloudClient.auth.signOut()}
+
 async function enterCloudApp(session){
   if(!session?.user||cloudBootstrapRunning)return;
   cloudBootstrapRunning=true;
@@ -4891,6 +4884,115 @@ body:has(#orderDialog[open]){overflow:hidden}
 
   const baseRenderAll205=window.renderAll;if(typeof baseRenderAll205==='function')window.renderAll=function(){const r=baseRenderAll205.apply(this,arguments);patchInventoryUi();return r};
   const migrated=migrate205();patchInventoryUi();if(migrated)setTimeout(saveInventory,0);else{try{window.renderTrees?.();window.renderStock?.();window.renderDashboard?.();window.renderAttentionV20?.()}catch(e){console.warn(e)}}
+})();
+</script>
+
+
+<style id="dxf-v22-stability-style">
+.safe-data-panel{margin-top:16px}.safe-data-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin:12px 0}.safe-data-stat{border:1px solid var(--line);background:var(--panel2);border-radius:10px;padding:10px}.safe-data-stat small{display:block;color:var(--muted);font-size:10px}.safe-data-stat b{display:block;margin-top:4px;font-size:19px}.safe-banner{border:1px solid color-mix(in srgb,var(--green) 40%,var(--line));background:color-mix(in srgb,var(--green) 8%,var(--panel));padding:10px 12px;border-radius:10px;font-size:11px;line-height:1.5}.safe-banner b{color:var(--green)}
+@media(min-width:821px){.app aside.main{display:flex;flex-direction:column;overflow:hidden!important}.app aside.main .brand{flex:0 0 auto}.app aside.main nav{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;padding-right:2px;padding-bottom:8px}.app aside.main .cloud-account,.app aside.main .version{position:static!important;left:auto!important;right:auto!important;bottom:auto!important;flex:0 0 auto}.app aside.main .cloud-account{margin-top:10px}.app aside.main .version{margin-top:8px}}
+@media(max-width:700px){.safe-data-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+</style>
+<script id="dxf-v22-stability-script">
+(function(){
+'use strict';
+const nowIso=()=>new Date().toISOString(),today=()=>nowIso().slice(0,10),num=v=>Number(v||0);
+const h=v=>typeof esc==='function'?esc(v):String(v??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));
+const cash=v=>typeof czk!=='undefined'?czk.format(num(v)):num(v).toLocaleString('cs-CZ')+' Kč';
+const dateOnly=v=>String(v||'').slice(0,10),cancelled=o=>['Zrušeno','Stornováno'].includes(o?.orderStatus);
+const orderCost=o=>(o?.items||[]).reduce((s,i)=>s+num(i.qty)*num(i.unitCost),0);
+const clientName=o=>(state.clients||[]).find(c=>c.id===o?.clientId)?.name||o?.customer||'Neznámý klient';
+const serviceName=s=>(state.clients||[]).find(c=>c.id===s?.clientId)?.name||s?.customer||'Klient';
+function ensureTx(){state.financeTransactions=Array.isArray(state.financeTransactions)?state.financeTransactions:[];return state.financeTransactions}
+function txFind(entityType,entityId,kind){return ensureTx().find(t=>t.entityType===entityType&&t.entityId===entityId&&t.kind===kind&&!t.reversedAt)}
+function addTx(entityType,entityId,kind,amount,date,label,meta={}){if(!amount||txFind(entityType,entityId,kind))return false;ensureTx().push({id:(crypto.randomUUID?crypto.randomUUID():Date.now().toString(36)+Math.random().toString(36).slice(2)),entityType,entityId,kind,amount:num(amount),date:dateOnly(date)||today(),label:String(label||''),createdAt:nowIso(),...meta});return true}
+function migrateTx(){
+  state.migrations=state.migrations&&typeof state.migrations==='object'?state.migrations:{};let changed=false;ensureTx();
+  (state.orders||[]).forEach(o=>{if(o.paymentStatus==='Zaplaceno')changed=addTx('order',o.id,'customer',num(o.total),o.customerPaidAt||o.updatedAt||o.createdAt||o.date,(o.number||'Objednávka')+' · '+clientName(o)+' · zákazník',{orderNumber:o.number,customer:clientName(o)})||changed;const c=orderCost(o);if(c>0&&o.dxfPaymentStatus==='Zaplaceno')changed=addTx('order',o.id,'dxf',-c,o.dxfPaidAt||o.updatedAt||o.createdAt||o.date,(o.number||'Objednávka')+' · DXF',{orderNumber:o.number,customer:clientName(o)})||changed});
+  (state.rcServices||[]).forEach(s=>{const linkedIn=(state.moneyMovements||[]).some(m=>m.id===s.linkedMoneyMovementId||m.linkedServiceId===s.id),linkedOut=(state.moneyMovements||[]).some(m=>m.id===s.linkedCostMovementId||m.linkedServiceCostId===s.id);if(!linkedIn&&s.paymentStatus==='Zaplaceno')changed=addTx('service',s.id,'service_customer',num(s.total),s.customerPaidAt||s.updatedAt||s.createdAt||s.date,serviceName(s)+' · '+(s.rcName||'servis'),{customer:serviceName(s)})||changed;if(!linkedOut&&num(s.cost)>0&&s.costPaymentStatus==='Zaplaceno')changed=addTx('service',s.id,'service_cost',-num(s.cost),s.serviceCostPaidAt||s.updatedAt||s.date,serviceName(s)+' · náklady servisu',{customer:serviceName(s)})||changed});
+  if(!state.migrations.v22PersistentFinance){state.migrations.v22PersistentFinance=true;changed=true}return changed
+}
+function manualRows(){
+  const linked=new Set();(state.rcServices||[]).forEach(s=>{if(s.linkedMoneyMovementId)linked.add(s.linkedMoneyMovementId);if(s.linkedCostMovementId)linked.add(s.linkedCostMovementId)});
+  return (state.moneyMovements||[]).filter(m=>!linked.has(m.id)).map(m=>({id:'manual:'+m.id,source:'manual',date:dateOnly(m.date||m.createdAt)||today(),label:(m.account||'Ruční')+' · '+(m.note||'Bez poznámky'),customer:m.account||'',income:num(m.amount)>0?num(m.amount):0,expense:num(m.amount)<0?Math.abs(num(m.amount)):0,net:num(m.amount),manualId:m.id,kind:m.movementKind==='initial'?'initial':'manual'}))
+}
+function groupedRows(){
+  migrateTx();const groups=new Map();
+  for(const t of ensureTx()){if(t.reversedAt)continue;const key=t.entityType+':'+t.entityId;let g=groups.get(key);if(!g){g={id:key,source:t.entityType,date:t.date,label:t.label,customer:t.customer||'',income:0,expense:0,net:0,orderId:t.entityType==='order'?t.entityId:'',serviceId:t.entityType==='service'?t.entityId:''};groups.set(key,g)}if(t.date>g.date)g.date=t.date;if(t.amount>0)g.income+=t.amount;else g.expense+=Math.abs(t.amount);g.net+=t.amount}
+  return [...groups.values(),...manualRows()]
+}
+function period(){
+  const mode=document.getElementById('financePeriod')?.value||'all',now=new Date(),y=now.getFullYear(),m=now.getMonth();
+  if(mode==='all')return{from:'',to:''};if(mode==='year')return{from:y+'-01-01',to:y+'-12-31'};
+  const d=mode==='prevMonth'?new Date(y,m-1,1):new Date(y,m,1),yy=d.getFullYear(),mm=String(d.getMonth()+1).padStart(2,'0'),last=String(new Date(yy,d.getMonth()+1,0).getDate()).padStart(2,'0');
+  return{from:yy+'-'+mm+'-01',to:yy+'-'+mm+'-'+last}
+}
+const inPeriod=(d,r)=>!r.from||(d>=r.from&&d<=r.to);
+function safeFinanceRender(){
+  const ledger=document.getElementById('financeLedger');if(!ledger)return;migrateTx();
+  const r=period(),filter=document.getElementById('financeMovementFilter')?.value||'all',q=String(document.getElementById('financeSearch')?.value||'').toLocaleLowerCase('cs-CZ'),sort=document.getElementById('financeSort')?.value||'dateDesc';
+  let rows=groupedRows(),running=0;const chronological=[...rows].sort((a,b)=>a.date.localeCompare(b.date)||a.id.localeCompare(b.id));chronological.forEach(x=>{running+=x.net;x.balance=running});
+  rows=chronological.filter(x=>inPeriod(x.date,r)&&(!q||[x.label,x.customer].join(' ').toLocaleLowerCase('cs-CZ').includes(q))&&(filter==='all'||filter==='income'&&x.income>0||filter==='expense'&&x.expense>0||filter==='manual'&&x.source==='manual'||filter==='orders'&&x.source==='order'||filter==='service'&&x.source==='service'));
+  const cmp={dateDesc:(a,b)=>b.date.localeCompare(a.date),dateAsc:(a,b)=>a.date.localeCompare(b.date),clientAsc:(a,b)=>(a.customer||a.label).localeCompare(b.customer||b.label,'cs'),clientDesc:(a,b)=>(b.customer||b.label).localeCompare(a.customer||a.label,'cs'),incomeDesc:(a,b)=>b.income-a.income,expenseDesc:(a,b)=>b.expense-a.expense,netDesc:(a,b)=>b.net-a.net,typeAsc:(a,b)=>a.source.localeCompare(b.source)}[sort]||((a,b)=>b.date.localeCompare(a.date));rows.sort(cmp);
+  ledger.innerHTML=rows.length?rows.map(x=>{
+    const source=x.source==='order'?'Objednávka':x.source==='service'?'Servis':x.kind==='initial'?'Počáteční vklad':'Ruční';
+    const note=x.orderId&&cancelled((state.orders||[]).find(o=>o.id===x.orderId))?'Objednávka je stornovaná, ale skutečný peněžní pohyb zůstává zachován.':'';
+    const action=x.manualId?'<button class="order-icon-btn" data-money-edit="'+h(x.manualId)+'">✎</button>':x.orderId?'<button class="order-icon-btn" data-order-open="'+h(x.orderId)+'">↗</button>':'';
+    return '<div class="finance-ledger-row"><div>'+h(new Date(x.date+'T12:00:00').toLocaleDateString('cs-CZ'))+'</div><div><button class="finance-ledger-source '+h(x.source)+'" type="button">'+source+'</button></div><div class="finance-ledger-description"><b>'+h(x.label)+'</b><span>'+note+'</span></div><div class="finance-ledger-amount plus">'+(x.income?'+ '+cash(x.income):'—')+'</div><div class="finance-ledger-amount minus">'+(x.expense?'− '+cash(x.expense):'—')+'</div><div class="finance-ledger-net '+(x.net>=0?'plus':'minus')+'">'+(x.net>0?'+ ':x.net<0?'− ':'')+cash(Math.abs(x.net))+'</div><div class="finance-ledger-balance">'+cash(x.balance)+'</div><div class="finance-ledger-actions">'+action+'</div></div>'
+  }).join(''):'<div class="empty">Žádné finanční pohyby.</div>';
+  ledger.querySelectorAll('[data-money-edit]').forEach(b=>b.onclick=()=>openMoneyDialog(b.dataset.moneyEdit));
+  ledger.querySelectorAll('[data-order-open]').forEach(b=>b.onclick=()=>openEditOrder(b.dataset.orderOpen));
+  const manual=(state.moneyMovements||[]).filter(m=>!((state.rcServices||[]).some(s=>s.linkedMoneyMovementId===m.id||s.linkedCostMovementId===m.id))).reduce((s,m)=>s+num(m.amount),0),tx=ensureTx().filter(t=>!t.reversedAt),balance=manual+tx.reduce((s,t)=>s+num(t.amount),0);
+  const set=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=v};
+  set('finCash',cash(balance));set('finCashSub','Trvalý peněžní deník – skutečná platba se stornem objednávky nemaže');
+  const cust=tx.filter(t=>t.kind==='customer').reduce((s,t)=>s+Math.max(0,num(t.amount)),0),dxf=Math.abs(tx.filter(t=>t.kind==='dxf').reduce((s,t)=>s+Math.min(0,num(t.amount)),0)),svc=tx.filter(t=>t.kind==='service_customer').reduce((s,t)=>s+Math.max(0,num(t.amount)),0),sc=Math.abs(tx.filter(t=>t.kind==='service_cost').reduce((s,t)=>s+Math.min(0,num(t.amount)),0));
+  set('finCustomerPaid',cash(cust));set('finDxfPaid','− '+cash(dxf));set('finServicePaid',cash(svc));set('finServiceCostPaid','− '+cash(sc))
+}
+function recordOrderTx(id,kind){const o=(state.orders||[]).find(x=>x.id===id);if(!o)return false;if(kind==='customer')return addTx('order',o.id,'customer',num(o.total),o.customerPaidAt||today(),(o.number||'Objednávka')+' · '+clientName(o)+' · zákazník',{orderNumber:o.number,customer:clientName(o)});if(kind==='dxf')return addTx('order',o.id,'dxf',-orderCost(o),o.dxfPaidAt||today(),(o.number||'Objednávka')+' · DXF',{orderNumber:o.number,customer:clientName(o)});return false}
+const baseCustomer=window.changePaymentStatus;window.changePaymentStatus=function(id,value){const existed=txFind('order',id,'customer'),r=baseCustomer?baseCustomer.apply(this,arguments):undefined;if(value==='Zaplaceno'&&!existed){recordOrderTx(id,'customer');save()}else if(value!=='Zaplaceno'&&existed){showCloudToast?.('Platba už je v peněžním deníku a nebyla smazána. Případnou vratku zapiš jako ruční výdaj.')}setTimeout(safeFinanceRender,5);return r};
+const baseDxf=window.changeDxfPaymentStatus;window.changeDxfPaymentStatus=function(id,value){const existed=txFind('order',id,'dxf'),r=baseDxf?baseDxf.apply(this,arguments):undefined;if(value==='Zaplaceno'&&!existed){recordOrderTx(id,'dxf');save()}else if(value!=='Zaplaceno'&&existed){showCloudToast?.('DXF platba už proběhla a ve Financích zůstává zachovaná.')}setTimeout(safeFinanceRender,5);return r};
+window.deleteOrder=function(id){const o=(state.orders||[]).find(x=>x.id===id);if(!o)return;if(!confirm('Objednávku už nebudu fyzicky mazat. Přesunout ji do stornovaného archivu?'))return;o.orderStatus='Stornováno';o.updatedAt=nowIso();if(typeof audit==='function')try{audit(o.id,'Bezpečné archivování','Objednávka nebyla smazána; zůstává v historii.')}catch{}save();showCloudToast?.('Objednávka zůstala v archivu. Finanční historie se nemaže.')};
+window.restore=function(e){const f=e.target.files[0];if(!f)return;const rd=new FileReader();rd.onload=()=>{try{const x=JSON.parse(rd.result);if(!x.settings||!Array.isArray(x.orders))throw new Error('Neplatná záloha');dxfSafeSnapshot('před sloučením zálohy');const before=state.orders?.length||0;state=dxfSafeMergeState(state,x);save();alert('Záloha byla bezpečně sloučena. Objednávky: '+before+' → '+(state.orders?.length||0)+'. Nic z aktuálních dat nebylo smazáno.')}catch(err){alert('Zálohu se nepodařilo načíst: '+(err.message||err))}e.target.value=''};rd.readAsText(f)};
+function ensureSafetyPanel(){
+  const settings=document.getElementById('settings');if(!settings||document.getElementById('dxfSafePanel'))return;
+  const p=document.createElement('div');p.id='dxfSafePanel';p.className='panel settings safe-data-panel';p.innerHTML='<h3>Bezpečnost dat</h3><div class="safe-banner"><b>V22 SAFE</b> · cloudová data se slučují, objednávky se fyzicky nemažou a skutečné platby zůstávají ve finančním deníku i po stornu.</div><div class="safe-data-grid"><div class="safe-data-stat"><small>Objednávky</small><b id="safeOrders">0</b></div><div class="safe-data-stat"><small>Trvalé finanční transakce</small><b id="safeTx">0</b></div><div class="safe-data-stat"><small>Ruční pohyby</small><b id="safeManual">0</b></div><div class="safe-data-stat"><small>Lokální snapshoty</small><b id="safeSnapshots">0</b></div></div><div class="actions"><button class="btn" id="safeSnapshotNow" type="button">Vytvořit snapshot</button><button class="btn" id="safeRestoreLast" type="button">Obnovit poslední snapshot</button><button class="btn dark" id="safeExport" type="button">Stáhnout bezpečnou zálohu</button></div><p class="hint">Načtení zálohy nyní data slučuje místo kompletního nahrazení.</p>';settings.appendChild(p);
+  document.getElementById('safeSnapshotNow').onclick=()=>{dxfSafeSnapshot('ruční snapshot');refreshSafety();alert('Snapshot vytvořen.')};
+  document.getElementById('safeRestoreLast').onclick=()=>{const idx=dxfSafeParse(localStorage.getItem(DXF_SAFE_SNAPSHOT_INDEX),[])||[];if(!idx.length)return alert('Žádný snapshot není uložen.');if(!confirm('Obnovit poslední snapshot? Aktuální data se předtím znovu zazálohují.'))return;dxfSafeSnapshot('před obnovou snapshotu');const x=dxfSafeParse(localStorage.getItem(idx[0].key));if(x){state=dxfSafeMergeState(state,x);save();alert('Snapshot byl sloučen s aktuálními daty.')}};
+  document.getElementById('safeExport').onclick=()=>{const blob=new Blob([JSON.stringify(state,null,2)],{type:'application/json'});download(blob,'DXF-SAFE-'+today()+'.json')};refreshSafety()
+}
+function refreshSafety(){const idx=dxfSafeParse(localStorage.getItem(DXF_SAFE_SNAPSHOT_INDEX),[])||[];const set=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v};set('safeOrders',state.orders?.length||0);set('safeTx',ensureTx().length);set('safeManual',state.moneyMovements?.length||0);set('safeSnapshots',idx.length)}
+function dxfTierQtyFromLabel(label){const s=String(label||''),m=s.match(/(?:^|\s)(\d+)\s*(?:PCS?|PACK|KS)\b/i)||s.match(/\b(\d+)\s*[- ]?PACK\b/i)||s.match(/\b(\d+)\s*[x×]\b/i)||s.match(/\b[x×]\s*(\d+)\b/i);return m?Math.max(1,num(m[1])):1}
+function dxfCatalogTiers(p){const a=typeof getCatalogPriceTiers==='function'?getCatalogPriceTiers(p):(Array.isArray(p?.priceTiers)&&p.priceTiers.length?p.priceTiers:[{qty:1,totalUsd:num(p?.supplierPriceUsd)}]);return a.filter(t=>num(t.qty)>0&&num(t.totalUsd)>=0).map(t=>({qty:Math.max(1,num(t.qty)),totalUsd:num(t.totalUsd)})).sort((a,b)=>a.qty-b.qty)}
+function dxfUnitSupplierUsd(p){const tiers=dxfCatalogTiers(p),single=tiers.find(t=>t.qty===1),base=single||tiers[0];return base?base.totalUsd/base.qty:num(p?.supplierPriceUsd)}
+function dxfShortName(p){const parts=['DXF baterie'];if(num(p?.cells))parts.push(num(p.cells)+'S');if(num(p?.capacity))parts.push(num(p.capacity)+'mAh');if(num(p?.cRating))parts.push(num(p.cRating)+'C');if(p?.caseType)parts.push(String(p.caseType));return parts.join(' ')}
+window.dxfUnitSupplierUsd=dxfUnitSupplierUsd;
+window.renderCatalog=function(){
+  let products=typeof allCatalogProducts==='function'?allCatalogProducts(true):(window.CATALOG||[]);
+  const searchEl=document.getElementById('catalogSearch'),q=typeof normalizedClientText==='function'?normalizedClientText(searchEl?.value||''):String(searchEl?.value||'').toLowerCase(),cap=num(document.getElementById('catalogCapacityFilter')?.value),cr=num(document.getElementById('catalogCRatingFilter')?.value),min=num(document.getElementById('catalogPriceMin')?.value),max=document.getElementById('catalogPriceMax')?.value===''?Infinity:num(document.getElementById('catalogPriceMax')?.value),cf=window.catFilter||{cells:null,caseType:null};
+  products=products.filter(p=>(!cf.cells||num(p.cells)===num(cf.cells))&&(!cf.caseType||p.caseType===cf.caseType)).filter(p=>{const hay=[dxfShortName(p),p.name,p.customName,p.connectors?.join(' '),p.packConfig,p.dimensions,p.customCategory,p.descriptionCs].join(' '),norm=typeof normalizedClientText==='function'?normalizedClientText(hay):hay.toLowerCase(),unit=dxfUnitSupplierUsd(p);return norm.includes(q)&&(!cap||num(p.capacity)===cap)&&(!cr||num(p.cRating)===cr)&&unit>=min&&unit<=max});
+  const sort=document.getElementById('catalogSort')?.value||'cells';products.sort((a,b)=>sort==='priceAsc'?dxfUnitSupplierUsd(a)-dxfUnitSupplierUsd(b):sort==='priceDesc'?dxfUnitSupplierUsd(b)-dxfUnitSupplierUsd(a):sort==='capacity'?num(a.capacity)-num(b.capacity):sort==='cRating'?num(a.cRating)-num(b.cRating):sort==='custom'?num(a.sortOrder||999999)-num(b.sortOrder||999999):num(a.cells)-num(b.cells)||String(a.caseType).localeCompare(String(b.caseType),'cs')||num(a.capacity)-num(b.capacity)||num(a.cRating)-num(b.cRating));
+  const grid=document.getElementById('catalogGrid');if(!grid)return;
+  grid.innerHTML=products.length?products.map(p=>{const tiers=dxfCatalogTiers(p),base=tiers.find(t=>t.qty===1)||tiers[0],unit=dxfUnitSupplierUsd(p),sale=typeof publicSalePrice==='function'?publicSalePrice(p):0,link=p.productUrl||(typeof dxfSearchUrl==='function'?dxfSearchUrl(p):'https://dxf-hobby.store/'),photo=typeof catalogPhotoCustomerHtml==='function'?catalogPhotoCustomerHtml(p):'',note=base&&base.qty>1?'<div class="hint">z balení '+base.qty+' ks / $'+base.totalUsd.toFixed(2)+'</div>':'';return '<article class="product-card">'+photo+'<div class="product-head"><span class="pill '+(p.caseType==='Softcase'?'soft':p.caseType==='Hardcase'?'hard':'')+'">'+num(p.cells)+'S · '+h(p.caseType||'Jiné')+'</span><span class="pill">'+num(p.voltage).toFixed(1)+' V</span></div><div class="catalog-card-meta">'+(p.customCategory?'<span class="pill custom-category-pill">'+h(p.customCategory)+'</span>':'')+(p.isCustom?'<span class="pill">Vlastní položka</span>':'')+'</div><h3>'+h(dxfShortName(p))+'</h3><div class="spec">'+num(p.capacity).toLocaleString('cs-CZ')+' mAh · '+num(p.cRating).toLocaleString('cs-CZ')+'C · '+h(p.packConfig||'Neuvedeno')+'<br>'+h(p.dimensions||'Rozměry neuvedeny')+'</div><div class="prices"><div class="price-box"><small>Prodej zákazníkovi</small><b>'+cash(sale)+'</b></div><div class="price-box"><small>DXF cena / 1 baterie</small><b>$'+unit.toFixed(2)+'</b>'+note+'</div></div><div class="connector-list"><b>Varianty:</b> '+((p.connectors||[]).map(h).join(', ')||'Neuvedeno')+'</div><div class="catalog-product-actions"><button class="btn primary" data-customer="'+h(p.id)+'">Zákaznický detail</button><button class="btn" data-order="'+h(p.id)+'">Objednat pro klienta</button><button class="btn" data-add="'+h(p.id)+'">Přidat do skladu</button><button class="btn" data-edit="'+h(p.id)+'">Upravit katalog</button><button class="btn" data-detail="'+h(p.id)+'">Interní ceny</button><button class="btn" data-link="'+h(link)+'">DXF produkt</button></div></article>'}).join(''):'<div class="empty">Žádná baterie neodpovídá filtrům.</div>';
+  grid.querySelectorAll('[data-customer]').forEach(b=>b.onclick=()=>openCustomerProduct(b.dataset.customer));grid.querySelectorAll('[data-order]').forEach(b=>b.onclick=()=>openOrderWithCatalog(b.dataset.order));grid.querySelectorAll('[data-add]').forEach(b=>b.onclick=()=>openAdd(b.dataset.add));grid.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>openCatalogEditor(b.dataset.edit));grid.querySelectorAll('[data-detail]').forEach(b=>b.onclick=()=>openDetails(b.dataset.detail));grid.querySelectorAll('[data-link]').forEach(b=>b.onclick=()=>window.open(b.dataset.link,'_blank'))
+};
+window.importCatalogFromDxf=async function(){
+  let url=document.getElementById('catalogEditorProductUrl').value.trim().split('?')[0].replace(/\/+$/,'');if(!url.includes('/products/'))return alert('Vlož odkaz na konkrétní produkt DXF.');
+  const status=document.getElementById('catalogImportStatus');status.textContent='Načítám produkt z DXF…';
+  try{
+    const response=await fetch(url+'.js',{headers:{Accept:'application/json'}});if(!response.ok)throw new Error('DXF vrátil chybu '+response.status+'.');
+    const product=await response.json(),titleText=String(product.title||''),cells=titleText.match(/(\d{1,2})\s*S\b/i),capacity=titleText.match(/(\d{3,6})\s*mAh/i),rating=titleText.match(/(\d{2,3})\s*C\b/i),voltage=titleText.match(/(\d{1,2}(?:[.,]\d)?)\s*V\b/i);
+    if(cells)catalogEditorCells.value=num(cells[1]);if(capacity)catalogEditorCapacity.value=num(capacity[1]);if(rating)catalogEditorCRating.value=num(rating[1]);if(voltage)catalogEditorVoltage.value=num(voltage[1].replace(',','.'));if(/hard\s*case|hardcase/i.test(titleText))catalogEditorCaseType.value='Hardcase';else if(/soft\s*case|softcase/i.test(titleText))catalogEditorCaseType.value='Softcase';if(document.getElementById('catalogEditorChemistry'))catalogEditorChemistry.value=/LiHV|\bHV\b/i.test(titleText)?'LiHV':'LiPo';
+    const variants=Array.isArray(product.variants)?product.variants:[],tierMap=new Map();variants.forEach(v=>{const label=[v.title,v.option1,v.option2,v.option3].filter(Boolean).join(' '),qty=dxfTierQtyFromLabel(label),price=num(v.price)/100;if(Number.isFinite(price)&&price>=0&&(!tierMap.has(qty)||price<tierMap.get(qty)))tierMap.set(qty,price)});
+    const tiers=[...tierMap.entries()].sort((a,b)=>a[0]-b[0]);if(tiers.length){catalogEditorTiers.value=tiers.map(([q,p])=>q+'='+p.toFixed(2)).join('\n');const base=tiers.find(([q])=>q===1)||tiers[0];catalogEditorPrice.value=(base[1]/base[0]).toFixed(2)}
+    let connectorValues=[];if(Array.isArray(product.options))product.options.forEach((option,index)=>{const name=typeof option==='string'?option:option?.name||'',values=typeof option==='object'&&Array.isArray(option.values)?option.values:variants.map(v=>v['option'+(index+1)]).filter(Boolean);if(/plug|connector|konektor/i.test(name))connectorValues.push(...values)});if(!connectorValues.length)variants.forEach(v=>[v.option1,v.option2,v.option3].filter(x=>typeof connectorLike==='function'?connectorLike(x):/XT60|XT90|EC3|EC5|IC3|IC5|TRX|DEANS|TAMIYA|Q8S|BULLET/i.test(String(x||''))).forEach(x=>connectorValues.push(x)));connectorValues=[...new Set(connectorValues.map(x=>String(x).trim()).filter(Boolean))];if(connectorValues.length)catalogEditorConnectors.value=connectorValues.join(', ');
+    catalogEditorName.value=dxfShortName({cells:num(catalogEditorCells.value),capacity:num(catalogEditorCapacity.value),cRating:num(catalogEditorCRating.value),caseType:catalogEditorCaseType.value});
+    const image=typeof absoluteShopifyImage==='function'?absoluteShopifyImage(product.featured_image||product.images?.[0]||''):(product.featured_image||product.images?.[0]||'');if(image){catalogEditorImageUrl.value=image;catalogEditorImageData.value='';if(typeof refreshCatalogEditorImagePreview==='function')refreshCatalogEditorImagePreview()}
+    status.textContent='Načteno: '+variants.length+' variant, '+connectorValues.length+' konektorů · DXF cena / 1 baterie $'+num(catalogEditorPrice.value).toFixed(2)+'.';
+  }catch(error){status.textContent='Automatické načtení se nepodařilo. Údaje můžeš vyplnit ručně.';alert('Načtení z DXF se nepodařilo: '+(error.message||error))}
+};
+const baseRender=window.renderAll;window.renderAll=function(){const r=baseRender?baseRender.apply(this,arguments):undefined;ensureSafetyPanel();refreshSafety();setTimeout(safeFinanceRender,15);return r};
+const baseGo=window.goView;window.goView=function(id){const r=baseGo?baseGo.apply(this,arguments):undefined;if(id==='finance')setTimeout(safeFinanceRender,15);if(id==='settings'){ensureSafetyPanel();refreshSafety()}return r};
+if(migrateTx())save();ensureSafetyPanel();refreshSafety();setTimeout(()=>{safeFinanceRender();window.renderCatalog?.()},20);
 })();
 </script>
 
