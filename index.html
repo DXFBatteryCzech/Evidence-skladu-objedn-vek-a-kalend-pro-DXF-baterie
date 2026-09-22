@@ -761,7 +761,7 @@ html[data-theme="dark"] .showcase-next-event{border-style:solid}
 
 
 <section id="finance" class="view">
- <div class="top"><div><div class="eyebrow">FINANCE V22.5</div><h1>Finance</h1><p>Skutečný pohyb peněz odvozený z objednávek. Ruční pohyby zůstávají zachované jako doplňková evidence.</p></div><div class="actions"><button class="btn" type="button" onclick="openMoneyDialog()">+ Ruční pohyb</button><button class="btn primary" type="button" onclick="renderFinanceV20()">Obnovit přehled</button></div></div>
+ <div class="top"><div><div class="eyebrow">FINANCE V22.6</div><h1>Finance</h1><p>Skutečný pohyb peněz odvozený z objednávek. Ruční pohyby zůstávají zachované jako doplňková evidence.</p></div><div class="actions"><button class="btn" type="button" onclick="openMoneyDialog()">+ Ruční pohyb</button><button class="btn primary" type="button" onclick="renderFinanceV20()">Obnovit přehled</button></div></div>
  <div class="finance-filterbar panel"><div class="toolbar"><select id="financePeriod" onchange="renderFinanceV20()"><option value="all">Celá historie</option><option value="month">Tento měsíc</option><option value="prevMonth">Minulý měsíc</option><option value="year">Tento rok</option></select><select id="financeMovementFilter" onchange="renderFinanceV20()"><option value="all">Všechny pohyby</option><option value="customer">Platby zákazníků</option><option value="dxf">Platby DXF</option><option value="manual">Ruční pohyby</option></select><input id="financeSearch" placeholder="Objednávka, klient, poznámka…" oninput="renderFinanceV20()"></div><div id="financeCompleteness" class="finance-completeness"></div></div>
  <div class="finance-kpis">
   <article class="finance-kpi cash"><small>Reálný stav účtu</small><strong id="finCash">0 Kč</strong><span id="finCashSub">Po všech potvrzených příjmech a výdajích</span></article>
@@ -5077,6 +5077,9 @@ function linkedServiceMovements(){
   return{inc,out,used}
 }
 function isExplicitAutoMove(m){return !!(m?.orderId||m?.linkedOrderId||m?.source==='auto'||m?.sourceType==='order'||m?.entityType==='order')}
+function transferredDxfFrom221(o){return String(o?.dxfCostTransferredFromOrderNumber||'').trim()}
+function hasTransferredDxf221(o){return !!transferredDxfFrom221(o)}
+
 function buildFinance221(){
   const {rows:txs,dupes}=canonicalTx(),byKey=new Map(txs.map(t=>[t._entityType+'|'+t._entityId+'|'+t._kind,t]));
   const events=[],conflicts=[];
@@ -5087,7 +5090,7 @@ function buildFinance221(){
       if(ct&&isActive&&o.paymentStatus==='Zaplaceno'&&Math.abs(amount-sale)>1)conflicts.push((o.number||'Objednávka')+': platba zákazníka '+C(amount)+' ≠ objednávka '+C(sale));
       events.push({id:'order:'+o.id+':customer',source:'order',kind:'customer',entityId:o.id,date:D(ct?ct._date:(o.customerPaidAt||o.updatedAt||o.createdAt||o.date)),amount,accountImpact:amount,customer:orderClient221(o),title:(o.number||'Objednávka')+' · '+orderClient221(o),sub:'Platba zákazníka',orderId:o.id,storno:!isActive})
     }
-    if(dt||o.dxfPaymentStatus==='Zaplaceno'){
+    if((dt||o.dxfPaymentStatus==='Zaplaceno')&&!hasTransferredDxf221(o)){
       const amount=dt?Math.abs(N(dt._amount)):cost;
       if(dt&&isActive&&o.dxfPaymentStatus==='Zaplaceno'&&cost>0&&Math.abs(amount-cost)>1)conflicts.push((o.number||'Objednávka')+': DXF platba '+C(amount)+' ≠ náklad '+C(cost));
       if(amount>0)events.push({id:'order:'+o.id+':dxf',source:'order',kind:'dxf',entityId:o.id,date:D(dt?dt._date:(o.dxfPaidAt||o.updatedAt||o.createdAt||o.date)),amount:-amount,accountImpact:-amount,customer:orderClient221(o),title:(o.number||'Objednávka')+' · '+orderClient221(o),sub:'Platba DXF',orderId:o.id,storno:!isActive})
@@ -5168,11 +5171,11 @@ function renderLedger221(events,r){
 function renderOrders221(r){
   const el=document.getElementById('financeOrderList');if(!el)return;const mode=document.getElementById('financeOrderFilter')?.value||'open',sort=document.getElementById('financeSort')?.value||'dateDesc';
   const {txs}=buildFinance221(),keys=new Set(txs.map(t=>t._entityType+'|'+t._entityId+'|'+t._kind));
-  let rows=(state.orders||[]).filter(activeOrder).filter(o=>inR(o.date,r)).filter(o=>{const paid=o.paymentStatus==='Zaplaceno'||keys.has('order|'+o.id+'|customer'),dxf=orderCost221(o)<=0||o.dxfPaymentStatus==='Zaplaceno'||keys.has('order|'+o.id+'|dxf'),open=!paid||!dxf;return mode==='all'||mode==='open'&&open||mode==='paid'&&!open});
+  let rows=(state.orders||[]).filter(activeOrder).filter(o=>inR(o.date,r)).filter(o=>{const paid=o.paymentStatus==='Zaplaceno'||keys.has('order|'+o.id+'|customer'),dxf=hasTransferredDxf221(o)||orderCost221(o)<=0||o.dxfPaymentStatus==='Zaplaceno'||keys.has('order|'+o.id+'|dxf'),open=!paid||!dxf;return mode==='all'||mode==='open'&&open||mode==='paid'&&!open});
   if(sort==='clientAsc'||sort==='clientDesc')rows.sort((a,b)=>(sort==='clientAsc'?1:-1)*orderClient221(a).localeCompare(orderClient221(b),'cs'));else rows.sort((a,b)=>String(b.date).localeCompare(String(a.date)));
   el.innerHTML='<div class="finance-order-row head"><div>Objednávka</div><div>Klient</div><div>Produkty</div><div>Zákazník +</div><div>DXF −</div><div>Čistě</div><div>Platba zákazníka</div><div>Platba DXF</div></div>'+(rows.length?rows.map(o=>{
-    const sale=saleTotal(o),cost=orderCost221(o),paid=o.paymentStatus==='Zaplaceno'||keys.has('order|'+o.id+'|customer'),dxfPaid=cost<=0||o.dxfPaymentStatus==='Zaplaceno'||keys.has('order|'+o.id+'|dxf'),inc=paid?sale:0,out=dxfPaid?cost:0,net=inc-out,products=(o.items||[]).slice(0,2).map(i=>N(i.qty)+'× '+String(i.productName||'Baterie')).join(' · ')+((o.items||[]).length>2?' · +'+(o.items.length-2):'');
-    return '<div class="finance-order-row"><div><button class="finance-order-number" data-v221-order="'+H(o.id)+'">'+H(o.number)+'</button><div class="hint">'+H(new Date(o.date+'T12:00:00').toLocaleDateString('cs-CZ'))+'</div></div><div class="finance-order-client"><b>'+H(orderClient221(o))+'</b></div><div class="finance-order-product">'+H(products)+'</div><div class="finance-money plus">'+(inc?'+ '+C(inc):'—')+'</div><div class="finance-money minus">'+(out?'− '+C(out):'—')+'</div><div class="finance-money '+(net>=0?'profit':'minus')+'">'+(net>0?'+ ':net<0?'− ':'')+C(Math.abs(net))+'</div><div><select class="status-select" data-v221-pay="'+H(o.id)+'">'+['Čeká na platbu','Zaplaceno','Dobírka'].map(x=>'<option '+(x===o.paymentStatus?'selected':'')+'>'+x+'</option>').join('')+'</select></div><div>'+(cost>0?'<select class="status-select" data-v221-dxf="'+H(o.id)+'">'+['Neurčeno','Čeká na platbu','Zaplaceno'].map(x=>'<option '+(x===(o.dxfPaymentStatus||'Neurčeno')?'selected':'')+'>'+x+'</option>').join('')+'</select>':'<span class="badge ok">Není potřeba</span>')+'</div></div>'
+    const sale=saleTotal(o),cost=orderCost221(o),transferFrom=transferredDxfFrom221(o),paid=o.paymentStatus==='Zaplaceno'||keys.has('order|'+o.id+'|customer'),dxfPaid=!!transferFrom||cost<=0||o.dxfPaymentStatus==='Zaplaceno'||keys.has('order|'+o.id+'|dxf'),inc=paid?sale:0,out=transferFrom?0:(dxfPaid?cost:0),net=inc-out,products=(o.items||[]).slice(0,2).map(i=>N(i.qty)+'× '+String(i.productName||'Baterie')).join(' · ')+((o.items||[]).length>2?' · +'+(o.items.length-2):'');
+    return '<div class="finance-order-row"><div><button class="finance-order-number" data-v221-order="'+H(o.id)+'">'+H(o.number)+'</button><div class="hint">'+H(new Date(o.date+'T12:00:00').toLocaleDateString('cs-CZ'))+'</div></div><div class="finance-order-client"><b>'+H(orderClient221(o))+'</b></div><div class="finance-order-product">'+H(products)+'</div><div class="finance-money plus">'+(inc?'+ '+C(inc):'—')+'</div><div class="finance-money minus">'+(out?'− '+C(out):'—')+'</div><div class="finance-money '+(net>=0?'profit':'minus')+'">'+(net>0?'+ ':net<0?'− ':'')+C(Math.abs(net))+'</div><div><select class="status-select" data-v221-pay="'+H(o.id)+'">'+['Čeká na platbu','Zaplaceno','Dobírka'].map(x=>'<option '+(x===o.paymentStatus?'selected':'')+'>'+x+'</option>').join('')+'</select></div><div>'+(transferFrom?'<span class="badge ok">DXF zaplaceno dříve</span><div class="hint">převzato z '+H(transferFrom)+'</div>':cost>0?'<select class="status-select" data-v221-dxf="'+H(o.id)+'">'+['Neurčeno','Čeká na platbu','Zaplaceno'].map(x=>'<option '+(x===(o.dxfPaymentStatus||'Neurčeno')?'selected':'')+'>'+x+'</option>').join('')+'</select>':'<span class="badge ok">Není potřeba</span>')+'</div></div>'
   }).join(''):'<div class="empty">Žádné objednávky pro zvolený filtr.</div>');
   el.querySelectorAll('[data-v221-order]').forEach(b=>b.onclick=()=>openEditOrder(b.dataset.v221Order));
   el.querySelectorAll('[data-v221-pay]').forEach(s=>s.onchange=()=>changePaymentStatus(s.dataset.v221Pay,s.value));
@@ -5184,7 +5187,7 @@ function renderKpis221(data,r){
   const customerEvents=events.filter(e=>e.kind==='customer'),dxfEvents=events.filter(e=>e.kind==='dxf'),serviceIn=events.filter(e=>e.kind==='service_customer'),serviceOut=events.filter(e=>e.kind==='service_cost');
   const dueOrders=active.filter(o=>o.paymentStatus!=='Zaplaceno'&&!txkeys.has('order|'+o.id+'|customer')),orderDue=dueOrders.reduce((a,o)=>a+saleTotal(o),0);
   const dueServices=(state.rcServices||[]).filter(s=>s.paymentStatus!=='Zaplaceno'&&!txkeys.has('service|'+s.id+'|service_customer')&&!linkedServiceMovements().inc.has(s.id)),serviceDue=dueServices.reduce((a,s)=>a+N(s.total),0);
-  const dueDxf=active.filter(o=>orderCost221(o)>0&&o.dxfPaymentStatus==='Čeká na platbu'&&!txkeys.has('order|'+o.id+'|dxf')),dxfDue=dueDxf.reduce((a,o)=>a+orderCost221(o),0);
+  const dueDxf=active.filter(o=>!hasTransferredDxf221(o)&&orderCost221(o)>0&&o.dxfPaymentStatus==='Čeká na platbu'&&!txkeys.has('order|'+o.id+'|dxf')),dxfDue=dueDxf.reduce((a,o)=>a+orderCost221(o),0);
   const links=linkedServiceMovements(),dueServiceCost=(state.rcServices||[]).filter(s=>serviceCost221(s)>0&&s.costPaymentStatus==='Čeká na platbu'&&!txkeys.has('service|'+s.id+'|service_cost')&&!links.out.has(s.id)),serviceCostDue=dueServiceCost.reduce((a,s)=>a+serviceCost221(s),0);
   const periodOrders=active.filter(o=>inR(o.date,r)),periodServices=(state.rcServices||[]).filter(s=>inR(s.date,r)),profit=periodOrders.reduce((a,o)=>a+(saleTotal(o)-N(o.shipping)-orderCost221(o)),0)+periodServices.reduce((a,s)=>a+N(s.profit),0);
   set('finCash',C(balance));set('finCashSub','Stav účtu = počáteční vklad + přijaté platby − skutečně zaplacené DXF a servisní náklady +/− ruční pohyby.');
@@ -5196,7 +5199,7 @@ function renderKpis221(data,r){
   set('finReceivables',C(orderDue+serviceDue));set('finReceivablesSub','Objednávky '+dueOrders.length+' / '+C(orderDue)+' · servis '+dueServices.length+' / '+C(serviceDue));
   set('finDxfPayable',C(dxfDue+serviceCostDue));set('finDxfPayableSub','DXF '+dueDxf.length+' / '+C(dxfDue)+' · servis '+dueServiceCost.length+' / '+C(serviceCostDue));
   set('finProfit',C(profit));set('finProfitSub','Pouze statistika prodeje − náklady; neovlivňuje stav účtu · '+r.label);
-  const unknownDxf=active.filter(o=>orderCost221(o)>0&&(!o.dxfPaymentStatus||o.dxfPaymentStatus==='Neurčeno')&&!txkeys.has('order|'+o.id+'|dxf')).length,unknownService=(state.rcServices||[]).filter(s=>serviceCost221(s)>0&&(!s.costPaymentStatus||s.costPaymentStatus==='Neurčeno')&&!txkeys.has('service|'+s.id+'|service_cost')&&!links.out.has(s.id)).length;
+  const unknownDxf=active.filter(o=>!hasTransferredDxf221(o)&&orderCost221(o)>0&&(!o.dxfPaymentStatus||o.dxfPaymentStatus==='Neurčeno')&&!txkeys.has('order|'+o.id+'|dxf')).length,unknownService=(state.rcServices||[]).filter(s=>serviceCost221(s)>0&&(!s.costPaymentStatus||s.costPaymentStatus==='Neurčeno')&&!txkeys.has('service|'+s.id+'|service_cost')&&!links.out.has(s.id)).length;
   const comp=document.getElementById('financeCompleteness');if(comp){const notes=[];if(dupes.length)notes.push('ignorováno '+dupes.length+' duplicitních finančních záznamů');if(unknownDxf||unknownService)notes.push('neurčené platby: DXF '+unknownDxf+', servis '+unknownService);if(conflicts.length)notes.push('nesoulad částky u '+conflicts.length+' plateb');comp.className='finance-completeness '+(notes.length?'warn':'ok');comp.textContent=notes.length?'⚠ '+notes.join(' · '):'✓ Finance jsou konzistentní – bez duplicit a neurčených plateb.'}
 }
 function financeV221Render(){
@@ -5290,6 +5293,55 @@ setTimeout(financeV221Render,60);
 (function(){
   const h=document.querySelector('#finance .finance-ledger-panel .hint');
   if(h)h.textContent='Reálný stav účtu: počáteční vklad + přijaté platby − skutečně zaplacené DXF a servisní náklady +/− ruční pohyby.';
+})();
+</script>
+
+
+<script id="dxf-v226-order-transfer">
+(function(){
+  function migrateTransfer(){
+    state.migrations=state.migrations&&typeof state.migrations==='object'?state.migrations:{};
+    if(state.migrations.v226MrazekBrezniakTransfer)return false;
+    const source=(state.orders||[]).find(o=>String(o.number||'').trim()==='DXF-2026-0009');
+    const target=(state.orders||[]).find(o=>String(o.number||'').trim()==='DXF-2026-0014');
+    if(!source||!target)return false;
+
+    try{if(typeof dxfSafeSnapshot==='function')dxfSafeSnapshot('před převodem DXF nákladu 0009 → 0014')}catch{}
+
+    source.dxfCostTransferredToOrderNumber=target.number;
+    target.dxfCostTransferredFromOrderNumber=source.number;
+
+    // Peníze za baterii odešly jen jednou — v původní objednávce Mrázka.
+    if(source.dxfPaymentStatus!=='Zaplaceno'){
+      source.dxfPaymentStatus='Zaplaceno';
+      source.dxfPaidAt=source.dxfPaidAt||source.updatedAt||source.createdAt||source.date||new Date().toISOString();
+    }
+
+    // Březniak používá už zaplacenou baterii. Náklad zůstává pro zisk, ale nevzniká nový cash-out.
+    target.dxfPaymentStatus='Není potřeba';
+    target.dxfPaidAt='';
+
+    state.auditLog=Array.isArray(state.auditLog)?state.auditLog:[];
+    const exists=state.auditLog.some(a=>a.action==='Převod zaplacené DXF baterie'&&a.orderId===target.id);
+    if(!exists){
+      state.auditLog.unshift({
+        id:(crypto.randomUUID?crypto.randomUUID():Date.now().toString(36)+Math.random().toString(36).slice(2)),
+        orderId:target.id,
+        action:'Převod zaplacené DXF baterie',
+        detail:'DXF náklad byl již zaplacen v '+source.number+'. Do '+target.number+' se nepřidává nový odchozí pohyb účtu.',
+        user:'Systém V22.6',
+        at:new Date().toISOString()
+      });
+    }
+    state.migrations.v226MrazekBrezniakTransfer=true;
+    try{if(typeof save==='function')save();else localStorage.setItem(KEY,JSON.stringify(state))}catch(e){console.warn(e)}
+    return true;
+  }
+  const changed=migrateTransfer();
+  setTimeout(()=>{
+    if(changed&&typeof showCloudToast==='function')showCloudToast('Převedl jsem zaplacený DXF náklad z 0009 Mrázek do 0014 Březniak bez druhého výdaje.');
+    if(typeof window.renderFinanceV20==='function')window.renderFinanceV20();
+  },100);
 })();
 </script>
 
