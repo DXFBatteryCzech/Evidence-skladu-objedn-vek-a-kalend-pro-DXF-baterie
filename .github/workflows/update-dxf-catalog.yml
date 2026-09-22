@@ -37,7 +37,7 @@ jobs:
 
       - name: Commitnout změny katalogu
         run: |
-          if git diff --quiet -- dxf-catalog.json; then
+          if [ -z "$(git status --porcelain -- dxf-catalog.json)" ]; then
             echo "Katalog beze změny."
             exit 0
           fi
