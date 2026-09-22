@@ -5748,4 +5748,328 @@ setTimeout(financeV221Render,60);
 })();
 
 </script>
+<script id="dxf-v23-live-catalog">
+
+(function(){
+  "use strict";
+
+  const RAW_URL="https://raw.githubusercontent.com/DXFBatteryCzech/Evidence-skladu-objedn-vek-a-kalend-pro-DXF-baterie/main/dxf-catalog.json";
+  let liveCatalog=[];
+  let generatedAt="";
+  window.__DXFLiveCatalogV23=liveCatalog;
+
+  const legacyProducts=typeof catalogProductsV11==="function"?catalogProductsV11:null;
+  const legacyFind=typeof findCatalogProductV11==="function"?findCatalogProductV11:null;
+
+  const n=v=>Number(v||0);
+  const h=v=>typeof esc==="function"?esc(v):String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const normalize=v=>typeof normalizedClientText==="function"?normalizedClientText(v):String(v||"").toLocaleLowerCase("cs-CZ");
+  const money=v=>{try{return czk.format(Math.round(n(v)))}catch{return Math.round(n(v)).toLocaleString("cs-CZ")+" Kč"}};
+
+  function liveProducts(includeHidden=false){
+    if(!liveCatalog.length)return [];
+    state.catalogOverrides=state.catalogOverrides||{};
+    state.hiddenCatalogIds=Array.isArray(state.hiddenCatalogIds)?state.hiddenCatalogIds:[];
+    const hidden=new Set(state.hiddenCatalogIds);
+    const base=liveCatalog.map(p=>({
+      ...p,
+      ...(state.catalogOverrides[p.id]||{}),
+      isCustom:false,
+      customCategory:p.sourceWarehouse==="EUROPE WAREHOUSE"?"EUROPE WAREHOUSE":"DXF GLOBAL"
+    }));
+    const manual=(state.customCatalog||[]).filter(p=>p.catalogOrigin==="manual-v23").map(p=>({...p,isCustom:true}));
+    return [...base,...manual].filter(p=>includeHidden||!hidden.has(p.id));
+  }
+
+  catalogProductsV11=function(includeHidden=false){
+    const live=liveProducts(includeHidden);
+    return live.length?live:(legacyProducts?legacyProducts(includeHidden):[]);
+  };
+  window.catalogProductsV11=catalogProductsV11;
+
+  findCatalogProductV11=function(id,includeHidden=true){
+    const live=catalogProductsV11(true).find(p=>p.id===id);
+    if(live)return live;
+    return legacyFind?legacyFind(id,includeHidden):null;
+  };
+  window.findCatalogProductV11=findCatalogProductV11;
+
+  function productById(id){return findCatalogProductV11(id,true)}
+
+  function currentFilter(){
+    try{return catFilter||{cells:null,caseType:null}}catch{return{cells:null,caseType:null}}
+  }
+
+  function salePrice(p){
+    const stock=(state.stock||[]).find(x=>x.catalogId===p.id&&n(x.saleCzk)>0);
+    if(stock)return n(stock.saleCzk);
+    if(n(p.publicSaleCzk)>0)return n(p.publicSaleCzk);
+    const cost=n(p.supplierPriceUsd)*n(state.settings?.rate||1)*(1-n(state.settings?.discount||0)/100);
+    const round=Math.max(1,n(state.settings?.round||10));
+    return Math.ceil(cost*(1+n(state.settings?.markup||35)/100)/round)*round;
+  }
+
+  function refreshFilterOptions(products){
+    const cap=document.getElementById("catalogCapacityFilter"),cr=document.getElementById("catalogCRatingFilter");
+    if(!cap||!cr)return;
+    const cv=cap.value,rv=cr.value;
+    const caps=[...new Set(products.map(p=>n(p.capacity)).filter(Boolean))].sort((a,b)=>a-b);
+    const rs=[...new Set(products.map(p=>n(p.cRating)).filter(Boolean))].sort((a,b)=>a-b);
+    cap.innerHTML='<option value="">Všechny kapacity</option>'+caps.map(v=>'<option value="'+v+'">'+v.toLocaleString("cs-CZ")+' mAh</option>').join("");
+    cr.innerHTML='<option value="">Všechna C</option>'+rs.map(v=>'<option value="'+v+'">'+v+'C</option>').join("");
+    cap.value=caps.includes(Number(cv))?cv:"";
+    cr.value=rs.includes(Number(rv))?rv:"";
+  }
+
+  window.renderCatalog=function(){
+    const grid=document.getElementById("catalogGrid");if(!grid)return;
+    let products=catalogProductsV11();
+    refreshFilterOptions(products);
+    const cf=currentFilter();
+    const q=normalize(document.getElementById("catalogSearch")?.value||"");
+    const capRaw=document.getElementById("catalogCapacityFilter")?.value||"";
+    const crRaw=document.getElementById("catalogCRatingFilter")?.value||"";
+    const minRaw=document.getElementById("catalogPriceMin")?.value||"";
+    const maxRaw=document.getElementById("catalogPriceMax")?.value||"";
+    const cap=capRaw===""?null:Number(capRaw),cr=crRaw===""?null:Number(crRaw);
+    let min=minRaw===""?0:Number(minRaw),max=maxRaw===""?Infinity:Number(maxRaw);
+    if(!Number.isFinite(min))min=0;if(!Number.isFinite(max))max=Infinity;if(max!==Infinity&&min>max){const x=min;min=max;max=x}
+
+    products=products.filter(p=>{
+      const text=normalize([p.customName,p.sourceTitle,p.series,p.chemistry,p.dimensions,p.sourceWarehouse,(p.connectors||[]).join(" ")].join(" "));
+      return (!cf.cells||n(p.cells)===n(cf.cells))
+        &&(!cf.caseType||String(p.caseType||"Jiné")===String(cf.caseType))
+        &&(!q||text.includes(q))
+        &&(cap===null||n(p.capacity)===cap)
+        &&(cr===null||n(p.cRating)===cr)
+        &&n(p.supplierPriceUsd)>=min&&n(p.supplierPriceUsd)<=max;
+    });
+
+    const sort=document.getElementById("catalogSort")?.value||"cells";
+    products.sort((a,b)=>
+      sort==="priceAsc"?n(a.supplierPriceUsd)-n(b.supplierPriceUsd):
+      sort==="priceDesc"?n(b.supplierPriceUsd)-n(a.supplierPriceUsd):
+      sort==="capacity"?n(a.capacity)-n(b.capacity):
+      sort==="cRating"?n(a.cRating)-n(b.cRating):
+      sort==="custom"?n(a.sortOrder||999999)-n(b.sortOrder||999999):
+      n(a.cells)-n(b.cells)||String(a.caseType||"").localeCompare(String(b.caseType||""),"cs")||n(a.capacity)-n(b.capacity)||n(a.cRating)-n(b.cRating)||String(a.customName||"").localeCompare(String(b.customName||""),"cs")
+    );
+
+    if(!products.length){
+      grid.innerHTML='<div class="empty"><b>Žádná baterie neodpovídá filtrům.</b><br><button class="btn" id="v23ClearFilters" type="button" style="margin-top:10px">Vymazat filtry</button></div>';
+      document.getElementById("v23ClearFilters")?.addEventListener("click",()=>window.resetCatalogFilters?.());
+      return;
+    }
+
+    grid.innerHTML=products.map(p=>{
+      const img=p.imageData||p.imageUrl||"";
+      const dims=p.dimensions||"Rozměry neuvedeny";
+      const weight=p.weightG?" · "+n(p.weightG).toLocaleString("cs-CZ")+" g":"";
+      const warehouse=p.sourceWarehouse||"DXF GLOBAL";
+      const source=p.sourceTitle||p.customName||"DXF baterie";
+      return '<article class="product-card">'+
+        '<button type="button" class="catalog-photo" data-v23-customer="'+h(p.id)+'">'+
+          (img?'<img src="'+h(img)+'" alt="'+h(p.customName||source)+'">':'<div class="catalog-photo-placeholder"><b>▣</b>Bez fotografie</div>')+
+        '</button>'+
+        '<div class="product-head"><span class="pill '+(p.caseType==="Softcase"?"soft":p.caseType==="Hardcase"?"hard":"")+'">'+n(p.cells)+'S · '+h(p.caseType||"Jiné")+'</span><span class="pill">'+n(p.voltage).toFixed(1)+' V</span></div>'+
+        '<div class="catalog-card-meta"><span class="pill">'+h(p.chemistry||"LiPo")+'</span><span class="pill custom-category-pill">'+h(warehouse)+'</span></div>'+
+        '<h3>'+h(p.customName||source)+'</h3>'+
+        '<div class="spec">'+n(p.capacity).toLocaleString("cs-CZ")+' mAh · '+n(p.cRating)+'C'+(p.series?' · '+h(p.series):'')+'<br>'+h(dims)+weight+'</div>'+
+        '<div class="prices"><div class="price-box"><small>Prodej zákazníkovi</small><b>'+money(salePrice(p))+'</b></div><div class="price-box"><small>DXF cena / 1 baterie</small><b>$'+n(p.supplierPriceUsd).toFixed(2)+'</b><div class="hint">'+h(warehouse)+'</div></div></div>'+
+        '<div class="connector-list"><b>Varianty:</b> '+((p.connectors||[]).map(h).join(", ")||"Neuvedeno")+'</div>'+
+        '<div class="catalog-product-actions">'+
+          '<button class="btn primary" data-v23-customer="'+h(p.id)+'">Zákaznický detail</button>'+
+          '<button class="btn" data-v23-order="'+h(p.id)+'">Objednat pro klienta</button>'+
+          '<button class="btn" data-v23-add="'+h(p.id)+'">Přidat do skladu</button>'+
+          '<button class="btn" data-v23-edit="'+h(p.id)+'">Upravit katalog</button>'+
+          '<button class="btn" data-v23-detail="'+h(p.id)+'">Interní ceny</button>'+
+          '<button class="btn" data-v23-link="'+h(p.productUrl||"https://dxf-hobby.store/")+'">DXF produkt</button>'+
+        '</div></article>';
+    }).join("");
+
+    grid.querySelectorAll("[data-v23-customer]").forEach(b=>b.onclick=()=>window.openCustomerProduct?.(b.dataset.v23Customer));
+    grid.querySelectorAll("[data-v23-order]").forEach(b=>b.onclick=()=>window.openOrderWithCatalog?.(b.dataset.v23Order));
+    grid.querySelectorAll("[data-v23-add]").forEach(b=>b.onclick=()=>window.openAdd?.(b.dataset.v23Add));
+    grid.querySelectorAll("[data-v23-edit]").forEach(b=>b.onclick=()=>window.openCatalogEditor?.(b.dataset.v23Edit));
+    grid.querySelectorAll("[data-v23-detail]").forEach(b=>b.onclick=()=>window.openDetails?.(b.dataset.v23Detail));
+    grid.querySelectorAll("[data-v23-link]").forEach(b=>b.onclick=()=>window.open(b.dataset.v23Link,"_blank"));
+  };
+
+  function packCostUsd(p,qty,connector){
+    qty=Math.max(1,Math.floor(n(qty)||1));
+    const all=Array.isArray(p?.variantPrices)?p.variantPrices.filter(v=>n(v.totalUsd)>0):[];
+    let variants=all.filter(v=>!connector||String(v.connector||"")===String(connector));
+    if(!variants.length)variants=all.filter(v=>!p.primaryConnector||String(v.connector||"")===String(p.primaryConnector));
+    if(!variants.length){
+      const tiers=Array.isArray(p?.priceTiers)?p.priceTiers:[];
+      variants=tiers.map(t=>({qty:n(t.qty),totalUsd:n(t.totalUsd)}));
+    }
+    const packs=new Map();
+    variants.forEach(v=>{const q=Math.max(1,n(v.qty)||1),price=n(v.totalUsd);if(price>0&&(!packs.has(q)||price<packs.get(q)))packs.set(q,price)});
+    if(!packs.size)return n(p?.supplierPriceUsd)*qty;
+
+    const dp=Array(qty+1).fill(Infinity);dp[0]=0;
+    for(let i=1;i<=qty;i++){
+      for(const [q,price] of packs){
+        if(i>=q&&Number.isFinite(dp[i-q]))dp[i]=Math.min(dp[i],dp[i-q]+price);
+      }
+    }
+    if(Number.isFinite(dp[qty]))return dp[qty];
+    const one=packs.get(1)||n(p?.supplierPriceUsd);
+    return one*qty;
+  }
+
+  function unitCostCzk(p,qty,connector){
+    if(!p)return 0;
+    const totalUsd=packCostUsd(p,qty,connector);
+    const per=totalUsd/Math.max(1,n(qty));
+    return Math.round(per*n(state.settings?.rate||1)*(1-n(state.settings?.discount||0)/100));
+  }
+
+  function adjustOrderRow(row){
+    if(!row||row.querySelector(".lsource")?.value!=="catalog")return;
+    const id=row.querySelector(".lp")?.value;
+    const p=productById(id);if(!p)return;
+    const qty=Math.max(1,n(row.querySelector(".lq")?.value)||1);
+    const connector=row.querySelector(".lconnector")?.value||p.primaryConnector||"";
+    const unit=unitCostCzk(p,qty,connector);
+    row.dataset.unitCost=unit;
+    const exact=packCostUsd(p,qty,connector);
+    const info=row.querySelector(".line-source-info");
+    if(info)info.textContent='DXF '+(p.sourceWarehouse||"GLOBAL")+' · '+connector+' · '+qty+' ks = $'+exact.toFixed(2);
+    const cost=row.querySelector(".line-cost");
+    if(cost)cost.innerHTML='Odhad nákupu: <b>'+money(unit)+'/ks</b>';
+    try{window.orderTotal?.()}catch{}
+  }
+
+  const oldAdd=window.addOrderLine;
+  if(typeof oldAdd==="function")window.addOrderLine=function(){
+    const before=document.querySelectorAll("#orderLines .order-line").length;
+    const r=oldAdd.apply(this,arguments);
+    const rows=document.querySelectorAll("#orderLines .order-line");
+    const row=rows[Math.min(before,rows.length-1)]||rows[rows.length-1];
+    setTimeout(()=>adjustOrderRow(row),0);
+    return r;
+  };
+
+  for(const key of ["orderProduct","orderConnectorChanged","orderQtyChanged"]){
+    const old=window[key];
+    if(typeof old==="function")window[key]=function(el){
+      const r=old.apply(this,arguments);
+      setTimeout(()=>adjustOrderRow(el?.closest?.(".order-line")),0);
+      return r;
+    };
+  }
+
+  function matchLiveForStock(s){
+    const candidates=liveCatalog.filter(p=>n(p.cells)===n(s.cells)&&String(p.caseType||"")===String(s.caseType||"")&&n(p.capacity)===n(s.capacity)&&n(p.cRating)===n(s.cRating));
+    if(candidates.length===1)return candidates[0];
+    if(candidates.length>1){
+      const name=normalize([s.name,s.series,s.dimensions].join(" "));
+      const scored=candidates.map(p=>({p,score:String(p.series||"").split(/\s+/).filter(Boolean).reduce((a,t)=>a+(name.includes(normalize(t))?1:0),0)+(s.dimensions&&p.dimensions===s.dimensions?2:0)})).sort((a,b)=>b.score-a.score);
+      if(scored[0]?.score>0&&scored[0].score>Number(scored[1]?.score||0))return scored[0].p;
+    }
+    return null;
+  }
+
+  function remapStock(){
+    let changed=0;
+    for(const s of (state.stock||[])){
+      if(s.catalogId&&liveCatalog.some(p=>p.id===s.catalogId))continue;
+      const p=matchLiveForStock(s);if(!p)continue;
+      s.catalogId=p.id;
+      if(!s.imageUrl)s.imageUrl=p.imageUrl||"";
+      s.productUrl=p.productUrl||s.productUrl||"";
+      s.liveCatalogLinkedAt=new Date().toISOString();
+      changed++;
+    }
+    if(changed){
+      try{if(typeof dxfSafeSnapshot==="function")dxfSafeSnapshot("před přemapováním skladu na katalog V23")}catch{}
+      try{save()}catch{try{localStorage.setItem(KEY,JSON.stringify(state))}catch{}}
+    }
+    return changed;
+  }
+
+  const oldSaveCatalog=typeof saveCatalogEditor==="function"?saveCatalogEditor:null;
+  if(oldSaveCatalog){
+    saveCatalogEditor=function(event){
+      const before=new Set((state.customCatalog||[]).map(p=>p.id));
+      const r=oldSaveCatalog.apply(this,arguments);
+      let changed=false;
+      for(const p of (state.customCatalog||[]))if(!before.has(p.id)&&!p.catalogOrigin){p.catalogOrigin="manual-v23";changed=true}
+      if(changed){try{save()}catch{}}
+      return r;
+    };
+    window.saveCatalogEditor=saveCatalogEditor;
+  }
+
+  const oldDuplicate=typeof duplicateCatalogProduct==="function"?duplicateCatalogProduct:null;
+  if(oldDuplicate){
+    duplicateCatalogProduct=function(id){
+      const before=new Set((state.customCatalog||[]).map(p=>p.id));
+      const r=oldDuplicate.apply(this,arguments);
+      let changed=false;
+      for(const p of (state.customCatalog||[]))if(!before.has(p.id)){p.catalogOrigin="manual-v23";changed=true}
+      if(changed){try{save()}catch{}}
+      return r;
+    };
+    window.duplicateCatalogProduct=duplicateCatalogProduct;
+  }
+
+  function updateCatalogMeta(count){
+    const note=document.querySelector("#catalog .source-note");
+    if(note)note.innerHTML='<b>V23 LIVE katalog:</b> aktuální data z nového DXF webu · '+count+' baterií · správné produktové URL a fotografie · EUROPE WAREHOUSE se používá vždy, když ho daný produkt nabízí.';
+    const actions=document.querySelector("#catalog .top .actions");
+    if(actions&&!document.getElementById("v23ReloadCatalog")){
+      const b=document.createElement("button");b.className="btn";b.type="button";b.id="v23ReloadCatalog";b.textContent="↻ Načíst aktuální DXF katalog";b.onclick=()=>loadLiveCatalog(true);actions.prepend(b);
+    }
+    const m=document.getElementById("mCatalog");if(m)m.textContent=String(count);
+  }
+
+  async function fetchCatalogJson(force){
+    const urls=[];
+    if(location.protocol==="http:"||location.protocol==="https:")urls.push(new URL("dxf-catalog.json?ts="+(force?Date.now():"v23"),location.href).href);
+    urls.push(RAW_URL+"?ts="+Date.now());
+    let lastErr=null;
+    for(const url of urls){
+      try{
+        const r=await fetch(url,{cache:"no-store"});
+        if(!r.ok)throw new Error("HTTP "+r.status);
+        const x=await r.json();
+        if(!Array.isArray(x.products)||x.products.length<100)throw new Error("Neplatný katalog");
+        return x;
+      }catch(e){lastErr=e}
+    }
+    throw lastErr||new Error("Katalog není dostupný");
+  }
+
+  async function loadLiveCatalog(force=false){
+    const grid=document.getElementById("catalogGrid");
+    if(grid&&!liveCatalog.length)grid.innerHTML='<div class="empty">Načítám aktuální katalog z DXF…</div>';
+    try{
+      const data=await fetchCatalogJson(force);
+      liveCatalog=data.products.map(p=>({...p,isCustom:false}));
+      window.__DXFLiveCatalogV23=liveCatalog;
+      generatedAt=data.generatedAt||"";
+      state.catalogMode="live-v23";
+      state.catalogLiveGeneratedAt=generatedAt;
+      const remapped=remapStock();
+      updateCatalogMeta(liveCatalog.length);
+      try{renderTrees()}catch{}
+      try{window.renderCatalog()}catch{}
+      try{window.renderStock?.()}catch{}
+      if(force&&typeof showCloudToast==="function")showCloudToast("Aktuální DXF katalog načten: "+liveCatalog.length+" baterií"+(remapped?" · přemapovaný sklad "+remapped+" položek":"")+".");
+    }catch(e){
+      console.error("DXF V23 live catalog",e);
+      updateCatalogMeta(legacyProducts?legacyProducts().length:0);
+      if(grid)grid.insertAdjacentHTML("afterbegin",'<div class="safe-banner" style="margin-bottom:12px">Aktuální DXF katalog se nepodařilo načíst. Dočasně používám starý katalog jako zálohu.</div>');
+      try{window.renderCatalog()}catch{}
+    }
+  }
+
+  window.loadLiveCatalogV23=loadLiveCatalog;
+  setTimeout(()=>loadLiveCatalog(false),60);
+})();
+
+</script>
 </body></html>
