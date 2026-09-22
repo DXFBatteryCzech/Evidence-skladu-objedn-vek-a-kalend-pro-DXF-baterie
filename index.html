@@ -5575,4 +5575,177 @@ setTimeout(financeV221Render,60);
 })();
 
 </script>
+<script id="dxf-v228-eu-warehouse-price">
+
+(function(){
+  "use strict";
+
+  const num=v=>Number(v||0);
+  const targetSlug="dxf-2s-shorty-lipo-battery-7-4v-140c-5200mah-5mm-t-plug-hardcase-1-6-pack-options-available";
+
+  function warehouseOptionIndex(product){
+    if(!Array.isArray(product?.options))return -1;
+    return product.options.findIndex(o=>/warehouse|delivery warehouse|sklad/i.test(String(typeof o==="string"?o:o?.name||"")));
+  }
+
+  function europeVariants(product){
+    const variants=Array.isArray(product?.variants)?product.variants:[];
+    const wi=warehouseOptionIndex(product);
+    if(wi<0)return variants;
+    const key="option"+(wi+1);
+    const eu=variants.filter(v=>/EUROPE\s*WAREHOUSE/i.test(String(v?.[key]||"")));
+    return eu.length?eu:variants;
+  }
+
+  function fixKnownEuropePrice(){
+    state.catalogOverrides=state.catalogOverrides||{};
+    state.customCatalog=Array.isArray(state.customCatalog)?state.customCatalog:[];
+    let changed=false;
+
+    const apply=p=>{
+      if(!p)return;
+      const url=String(p.productUrl||"").toLowerCase();
+      if(!url.includes(targetSlug))return;
+      p.supplierPriceUsd=51.04;
+      p.priceTiers=[{qty:1,totalUsd:51.04}];
+      p.sourceWarehouse="EUROPE WAREHOUSE";
+      p.priceVerifiedAt="2026-09-22";
+      changed=true;
+    };
+
+    state.customCatalog.forEach(apply);
+    Object.keys(state.catalogOverrides).forEach(id=>apply(state.catalogOverrides[id]));
+
+    try{
+      if(typeof CATALOG!=="undefined"&&Array.isArray(CATALOG)){
+        CATALOG.forEach(base=>{
+          const url=String(base.productUrl||"").toLowerCase();
+          if(url.includes(targetSlug)){
+            state.catalogOverrides[base.id]={
+              ...(state.catalogOverrides[base.id]||{}),
+              supplierPriceUsd:51.04,
+              priceTiers:[{qty:1,totalUsd:51.04}],
+              sourceWarehouse:"EUROPE WAREHOUSE",
+              priceVerifiedAt:"2026-09-22"
+            };
+            changed=true;
+          }
+        });
+      }
+    }catch(e){console.warn(e)}
+
+    if(changed){
+      try{
+        if(typeof dxfSafeSnapshot==="function")dxfSafeSnapshot("před opravou ceny Europe Warehouse");
+      }catch(e){}
+      try{
+        if(typeof save==="function")save();
+        else localStorage.setItem(KEY,JSON.stringify(state));
+      }catch(e){console.warn(e)}
+    }
+    return changed;
+  }
+
+  window.importCatalogFromDxf=async function(){
+    const urlEl=document.getElementById("catalogEditorProductUrl");
+    const status=document.getElementById("catalogImportStatus");
+    let url=String(urlEl?.value||"").trim().split("?")[0].replace(/\/+$/,"");
+    if(!url.includes("/products/"))return alert("Vlož odkaz na konkrétní produkt DXF.");
+    if(status)status.textContent="Načítám produkt z DXF pro EUROPE WAREHOUSE…";
+
+    try{
+      const response=await fetch(url+".js",{headers:{Accept:"application/json"}});
+      if(!response.ok)throw new Error("DXF vrátil chybu "+response.status+".");
+      const product=await response.json();
+      const titleText=String(product.title||"");
+
+      const cells=titleText.match(/(\d{1,2})\s*S\b/i);
+      const capacity=titleText.match(/(\d{3,6})\s*mAh/i);
+      const rating=titleText.match(/(\d{2,3})\s*C\b/i);
+      const voltage=titleText.match(/(\d{1,2}(?:[.,]\d)?)\s*V\b/i);
+
+      if(cells)catalogEditorCells.value=num(cells[1]);
+      if(capacity)catalogEditorCapacity.value=num(capacity[1]);
+      if(rating)catalogEditorCRating.value=num(rating[1]);
+      if(voltage)catalogEditorVoltage.value=num(voltage[1].replace(",","."));
+      if(/hard\s*case|hardcase/i.test(titleText))catalogEditorCaseType.value="Hardcase";
+      else if(/soft\s*case|softcase/i.test(titleText))catalogEditorCaseType.value="Softcase";
+      if(document.getElementById("catalogEditorChemistry"))catalogEditorChemistry.value=/LiHV|\bHV\b/i.test(titleText)?"LiHV":"LiPo";
+
+      const allVariants=Array.isArray(product.variants)?product.variants:[];
+      const variants=europeVariants(product);
+      const wi=warehouseOptionIndex(product);
+      const tierMap=new Map();
+
+      variants.forEach(v=>{
+        const label=[v.title,v.option1,v.option2,v.option3].filter(Boolean).join(" ");
+        const qty=typeof dxfTierQtyFromLabel==="function"?dxfTierQtyFromLabel(label):1;
+        const price=num(v.price)/100;
+        if(Number.isFinite(price)&&price>=0&&(!tierMap.has(qty)||price<tierMap.get(qty)))tierMap.set(qty,price);
+      });
+
+      const tiers=[...tierMap.entries()].sort((a,b)=>a[0]-b[0]);
+      if(tiers.length){
+        catalogEditorTiers.value=tiers.map(([q,p])=>q+"="+p.toFixed(2)).join("\n");
+        const base=tiers.find(([q])=>q===1)||tiers[0];
+        catalogEditorPrice.value=(base[1]/base[0]).toFixed(2);
+      }
+
+      let connectorValues=[];
+      if(Array.isArray(product.options)){
+        product.options.forEach((option,index)=>{
+          if(index===wi)return;
+          const name=typeof option==="string"?option:option?.name||"";
+          const values=typeof option==="object"&&Array.isArray(option.values)
+            ? option.values
+            : variants.map(v=>v?.["option"+(index+1)]).filter(Boolean);
+          if(/plug|connector|konektor/i.test(name))connectorValues.push(...values);
+        });
+      }
+      if(!connectorValues.length){
+        variants.forEach(v=>{
+          [v.option1,v.option2,v.option3]
+            .filter(x=>typeof connectorLike==="function"?connectorLike(x):/XT60|XT90|EC3|EC5|IC3|IC5|TRX|DEANS|TAMIYA|Q8S|BULLET|5MM/i.test(String(x||"")))
+            .forEach(x=>connectorValues.push(x));
+        });
+      }
+      connectorValues=[...new Set(connectorValues.map(x=>String(x).trim()).filter(Boolean).filter(x=>!/WAREHOUSE/i.test(x)))];
+      if(connectorValues.length)catalogEditorConnectors.value=connectorValues.join(", ");
+
+      if(typeof dxfShortName==="function"){
+        catalogEditorName.value=dxfShortName({
+          cells:num(catalogEditorCells.value),
+          capacity:num(catalogEditorCapacity.value),
+          cRating:num(catalogEditorCRating.value),
+          caseType:catalogEditorCaseType.value
+        });
+      }
+
+      const image=typeof absoluteShopifyImage==="function"
+        ? absoluteShopifyImage(product.featured_image||product.images?.[0]||"")
+        : (product.featured_image||product.images?.[0]||"");
+      if(image){
+        catalogEditorImageUrl.value=image;
+        catalogEditorImageData.value="";
+        if(typeof refreshCatalogEditorImagePreview==="function")refreshCatalogEditorImagePreview();
+      }
+
+      if(status){
+        const warehouseText=wi>=0&&variants.length!==allVariants.length?"EUROPE WAREHOUSE":"výchozí varianty";
+        status.textContent="Načteno z "+warehouseText+": "+variants.length+" variant · DXF cena / 1 baterie $"+num(catalogEditorPrice.value).toFixed(2)+".";
+      }
+    }catch(error){
+      if(status)status.textContent="Automatické načtení se nepodařilo. Údaje můžeš vyplnit ručně.";
+      alert("Načtení z DXF se nepodařilo: "+(error.message||error));
+    }
+  };
+
+  const changed=fixKnownEuropePrice();
+  setTimeout(()=>{
+    if(typeof window.renderCatalog==="function")window.renderCatalog();
+    if(changed&&typeof showCloudToast==="function")showCloudToast("Opravil jsem cenu 2S 5200mAh 140C na EUROPE WAREHOUSE: $51.04 / 1 ks.");
+  },120);
+})();
+
+</script>
 </body></html>
