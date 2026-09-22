@@ -761,7 +761,7 @@ html[data-theme="dark"] .showcase-next-event{border-style:solid}
 
 
 <section id="finance" class="view">
- <div class="top"><div><div class="eyebrow">FINANCE V22.3</div><h1>Finance</h1><p>Skutečný pohyb peněz odvozený z objednávek. Ruční pohyby zůstávají zachované jako doplňková evidence.</p></div><div class="actions"><button class="btn" type="button" onclick="openMoneyDialog()">+ Ruční pohyb</button><button class="btn primary" type="button" onclick="renderFinanceV20()">Obnovit přehled</button></div></div>
+ <div class="top"><div><div class="eyebrow">FINANCE V22.4</div><h1>Finance</h1><p>Skutečný pohyb peněz odvozený z objednávek. Ruční pohyby zůstávají zachované jako doplňková evidence.</p></div><div class="actions"><button class="btn" type="button" onclick="openMoneyDialog()">+ Ruční pohyb</button><button class="btn primary" type="button" onclick="renderFinanceV20()">Obnovit přehled</button></div></div>
  <div class="finance-filterbar panel"><div class="toolbar"><select id="financePeriod" onchange="renderFinanceV20()"><option value="all">Celá historie</option><option value="month">Tento měsíc</option><option value="prevMonth">Minulý měsíc</option><option value="year">Tento rok</option></select><select id="financeMovementFilter" onchange="renderFinanceV20()"><option value="all">Všechny pohyby</option><option value="customer">Platby zákazníků</option><option value="dxf">Platby DXF</option><option value="manual">Ruční pohyby</option></select><input id="financeSearch" placeholder="Objednávka, klient, poznámka…" oninput="renderFinanceV20()"></div><div id="financeCompleteness" class="finance-completeness"></div></div>
  <div class="finance-kpis">
   <article class="finance-kpi cash"><small>Reálný stav účtu</small><strong id="finCash">0 Kč</strong><span id="finCashSub">Po všech potvrzených příjmech a výdajích</span></article>
@@ -5124,14 +5124,36 @@ function grouped221(events){
   }
   return[...map.values()]
 }
+
+function sameDaySequence221(g){
+  if(g?.orderId){
+    const o=(state.orders||[]).find(x=>x.id===g.orderId);
+    const ts=Date.parse(o?.customerPaidAt||o?.createdAt||o?.updatedAt||'');
+    if(Number.isFinite(ts)&&String(o?.customerPaidAt||o?.createdAt||o?.updatedAt||'').includes('T'))return ts;
+    const m=String(o?.number||'').match(/(\d+)\s*$/);
+    if(m)return Number(m[1]);
+  }
+  if(g?.serviceId){
+    const s=(state.rcServices||[]).find(x=>x.id===g.serviceId);
+    const ts=Date.parse(s?.customerPaidAt||s?.createdAt||s?.updatedAt||'');
+    if(Number.isFinite(ts))return ts;
+  }
+  if(g?.manualId){
+    const m=(state.moneyMovements||[]).find(x=>x.id===g.manualId);
+    const ts=Date.parse(m?.createdAt||m?.updatedAt||'');
+    if(Number.isFinite(ts))return ts;
+    if(m?.movementKind==='initial')return -1;
+  }
+  return 0
+}
 function sortRows221(rows,mode){
-  const cmp={dateAsc:(a,b)=>a.date.localeCompare(b.date),clientAsc:(a,b)=>(a.customer||a.title).localeCompare(b.customer||b.title,'cs'),clientDesc:(a,b)=>(b.customer||b.title).localeCompare(a.customer||a.title,'cs'),incomeDesc:(a,b)=>b.income-a.income,expenseDesc:(a,b)=>b.expense-a.expense,netDesc:(a,b)=>b.net-a.net,typeAsc:(a,b)=>a.source.localeCompare(b.source)}[mode]||((a,b)=>b.date.localeCompare(a.date));
+  const cmp={dateAsc:(a,b)=>a.date.localeCompare(b.date)||(a._chron??0)-(b._chron??0),clientAsc:(a,b)=>(a.customer||a.title).localeCompare(b.customer||b.title,'cs')||b.date.localeCompare(a.date),clientDesc:(a,b)=>(b.customer||b.title).localeCompare(a.customer||a.title,'cs')||b.date.localeCompare(a.date),incomeDesc:(a,b)=>b.income-a.income||b.date.localeCompare(a.date),expenseDesc:(a,b)=>b.expense-a.expense||b.date.localeCompare(a.date),netDesc:(a,b)=>b.net-a.net||b.date.localeCompare(a.date),typeAsc:(a,b)=>a.source.localeCompare(b.source)||b.date.localeCompare(a.date)}[mode]||((a,b)=>b.date.localeCompare(a.date)||(b._chron??0)-(a._chron??0));
   return rows.sort(cmp)
 }
 function renderLedger221(events,r){
   const el=document.getElementById('financeLedger');if(!el)return;
   const filter=document.getElementById('financeMovementFilter')?.value||'all',q=String(document.getElementById('financeSearch')?.value||'').toLocaleLowerCase('cs-CZ'),sort=document.getElementById('financeSort')?.value||'dateDesc';
-  let groups=grouped221(events),running=0;const chronological=[...groups].sort((a,b)=>a.date.localeCompare(b.date)||a.id.localeCompare(b.id));chronological.forEach(g=>{running+=Number(g.accountNet||0);g.balance=running});
+  let groups=grouped221(events),running=0;const chronological=[...groups].sort((a,b)=>a.date.localeCompare(b.date)||sameDaySequence221(a)-sameDaySequence221(b)||a.id.localeCompare(b.id));chronological.forEach((g,i)=>{running+=Number(g.accountNet||0);g.balance=running;g._chron=i});
   groups=chronological.filter(g=>inR(g.date,r)&&(!q||[g.title,g.sub,g.customer].join(' ').toLocaleLowerCase('cs-CZ').includes(q))&&(filter==='all'||filter==='income'&&g.income>0||filter==='expense'&&g.expense>0||filter==='manual'&&g.source==='manual'||filter==='orders'&&g.source==='order'||filter==='service'&&g.source==='service'));
   sortRows221(groups,sort);
   el.innerHTML=groups.length?groups.map(g=>{
@@ -5252,6 +5274,14 @@ setTimeout(financeV221Render,60);
 (function(){
   const h=document.querySelector('#finance .finance-ledger-panel .hint');
   if(h)h.textContent='Příjem a DXF náklad jsou vedle sebe pro kontrolu zisku. Sloupec Zůstatek ale ukazuje jen skutečný stav sledovaného účtu.';
+})();
+</script>
+
+
+<script id="dxf-v224-same-day-balance">
+(function(){
+  const h=document.querySelector('#finance .finance-ledger-panel .hint');
+  if(h)h.textContent='Zůstatek je stav účtu po konkrétním pohybu. U více plateb ve stejný den se řádky řadí stabilně podle času platby, případně podle čísla objednávky.';
 })();
 </script>
 
