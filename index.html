@@ -2329,7 +2329,15 @@ let dxfSyncBaseline = null;
 let dxfSyncQueue = Promise.resolve();
 let dxfSyncOwner = localStorage.getItem(KEY + ':sync-owner');
 const dxfSyncCopy = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
-const dxfSyncEqual = (a,b) => JSON.stringify(a) === JSON.stringify(b);
+// PostgreSQL JSONB may return object keys in a different order. Compare their
+// contents, including nested objects, without treating key order as an edit.
+const dxfSyncCanonical = value => JSON.stringify(value,(_key,item)=>{
+  if(item && typeof item==='object' && !Array.isArray(item)){
+    return Object.fromEntries(Object.keys(item).sort().map(key=>[key,item[key]]));
+  }
+  return item;
+});
+const dxfSyncEqual = (a,b) => dxfSyncCanonical(a) === dxfSyncCanonical(b);
 const dxfSyncObject = value => value && typeof value === 'object' && !Array.isArray(value);
 function dxfSyncMerge(base, local, remote){
   if(dxfSyncEqual(base,local))return dxfSyncCopy(remote);
@@ -2503,7 +2511,6 @@ document.addEventListener('visibilitychange',()=>{
 });
 window.addEventListener('pageshow',()=>pullCloudIfNewer(false));
 setInterval(()=>{if(document.visibilityState==='visible')pullCloudIfNewer(false)},5000);
-
 
 async function enterCloudApp(session){
   if(!session?.user||cloudBootstrapRunning)return;
