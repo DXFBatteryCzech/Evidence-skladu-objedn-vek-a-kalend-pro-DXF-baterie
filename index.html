@@ -2376,7 +2376,11 @@ function dxfSyncPersist(user){
 }
 function dxfSyncApply(value,user){
   cloudApplyingRemote=true;
-  try{state=normalizeCloudState(value);renderAll();dxfSyncPersist(user)}
+  try{
+    const next=normalizeCloudState(value);
+    if(!dxfSyncEqual(state,next)){state=next;renderAll()}
+    dxfSyncPersist(user);
+  }
   finally{cloudApplyingRemote=false}
 }
 function dxfSyncEnqueue(action){
@@ -2395,7 +2399,8 @@ function dxfSyncRetry(){
 }
 async function dxfSyncRun(user,write=false,notice=false){
   if(!user||!cloudReady||cloudUser?.id!==user.id)return false;
-  setSyncStatus(write?'Ukládám změny…':'Kontroluji změny…','busy');
+  // Silent background checks should not flash the status or rebuild the page.
+  if(notice)setSyncStatus('Kontroluji změny…','busy');
   try{
     for(let attempt=0;attempt<5;attempt++){
       const row=await dxfSyncRead(user);
@@ -2420,6 +2425,7 @@ async function dxfSyncRun(user,write=false,notice=false){
         setSyncStatus('Místní změny čekají na uložení','busy');
         dxfSyncRetry();return true;
       }
+      setSyncStatus('Ukládám změny…','busy');
       // Compare-and-swap: a concurrent writer makes this update return no row.
       const nextTimestamp=new Date(Math.max(Date.now(),Date.parse(row?.updated_at||'')+1||0)).toISOString();
       merged.__syncV24={version:24};
