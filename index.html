@@ -2323,41 +2323,191 @@ function dxfSafeMergeState(localState,remoteState){
 }
 window.dxfSafeMergeState=dxfSafeMergeState;
 function dxfSafeCounts(x){return{orders:x?.orders?.length||0,money:x?.moneyMovements?.length||0,finance:x?.financeTransactions?.length||0,clients:x?.clients?.length||0}}
+/* V24: three-way synchronization; the baseline records the last cloud version
+   this device actually saw. Only edits since that baseline may override it. */
+let dxfSyncBaseline = null;
+let dxfSyncQueue = Promise.resolve();
+let dxfSyncOwner = localStorage.getItem(KEY + ':sync-owner');
+const dxfSyncCopy = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+const dxfSyncEqual = (a,b) => JSON.stringify(a) === JSON.stringify(b);
+const dxfSyncObject = value => value && typeof value === 'object' && !Array.isArray(value);
+function dxfSyncMerge(base, local, remote){
+  if(dxfSyncEqual(base,local))return dxfSyncCopy(remote);
+  if(dxfSyncEqual(base,remote) || dxfSyncEqual(local,remote))return dxfSyncCopy(local);
+  // Collections use IDs so independent edits and deletions survive together.
+  if([base,local,remote].every(Array.isArray) && [...base,...local,...remote].every(x=>dxfSyncObject(x)&&x.id!=null)){
+    const maps=[base,local,remote].map(list=>new Map(list.map(x=>[String(x.id),x])));
+    const ids=new Set([...maps[2].keys(),...maps[1].keys(),...maps[0].keys()]);
+    const result=[];
+    for(const id of ids){
+      const value=dxfSyncMerge(maps[0].get(id),maps[1].get(id),maps[2].get(id));
+      if(value!==undefined)result.push(value);
+    }
+    return result;
+  }
+  if(dxfSyncObject(local)&&dxfSyncObject(remote)&&(base===undefined||dxfSyncObject(base))){
+    const result={};
+    for(const key of new Set([...Object.keys(base||{}),...Object.keys(local),...Object.keys(remote)])){
+      // Old diagnostic timestamps are not business edits.
+      if(key==='__safe'||key==='__syncV24'){if(remote[key]!==undefined)result[key]=dxfSyncCopy(remote[key]);continue}
+      const value=dxfSyncMerge(base?.[key],local[key],remote[key]);
+      if(value!==undefined)result[key]=value;
+    }
+    return result;
+  }
+  return dxfSyncCopy(local);
+}
+function dxfSyncBaselineKey(user){return KEY+':sync-baseline:'+user.id}
+function dxfSyncPersist(user){
+  localStorage.setItem(KEY,JSON.stringify(state));
+  if(user){
+    localStorage.setItem(KEY+':sync-owner',user.id);
+    localStorage.setItem(KEY+':sync-cache:'+user.id,JSON.stringify(state));
+    if(dxfSyncBaseline)localStorage.setItem(dxfSyncBaselineKey(user),JSON.stringify(dxfSyncBaseline));
+  }
+}
+function dxfSyncApply(value,user){
+  cloudApplyingRemote=true;
+  try{state=normalizeCloudState(value);renderAll();dxfSyncPersist(user)}
+  finally{cloudApplyingRemote=false}
+}
+function dxfSyncEnqueue(action){
+  const result=dxfSyncQueue.then(action);
+  dxfSyncQueue=result.catch(()=>{});
+  return result;
+}
+async function dxfSyncRead(user){
+  const result=await cloudClient.from('dxf_app_state').select('data,updated_at').eq('user_id',user.id).maybeSingle();
+  if(result.error)throw result.error;
+  return result.data;
+}
+function dxfSyncRetry(){
+  clearTimeout(cloudSaveTimer);
+  if(cloudReady)cloudSaveTimer=setTimeout(()=>pushCloudState(false),5000);
+}
+async function dxfSyncRun(user,write=false,notice=false){
+  if(!user||!cloudReady||cloudUser?.id!==user.id)return false;
+  setSyncStatus(write?'Ukládám změny…':'Kontroluji změny…','busy');
+  try{
+    for(let attempt=0;attempt<5;attempt++){
+      const row=await dxfSyncRead(user);
+      if(cloudUser?.id!==user.id||!cloudReady)return false;
+      const remote=normalizeCloudState(dxfSyncCopy(row?.data||defaults));
+      const base=dxfSyncCopy(dxfSyncBaseline||remote);
+      const local=dxfSyncCopy(state);
+      const merged=dxfSyncMerge(base,local,remote);
+      merged.__syncV24={version:24};
+      const pending=!dxfSyncEqual(merged,remote);
+      if(!pending){
+        dxfSafeSnapshot('před načtením změn z jiného zařízení');
+        dxfSyncBaseline=dxfSyncCopy(remote);lastCloudUpdatedAt=row?.updated_at||null;
+        dxfSyncApply(remote,user);
+        setSyncStatus('Synchronizováno · V24','ok');
+        if(notice)showCloudToast('Načteny aktuální údaje ze společného účtu.');
+        return true;
+      }
+      if(!write){
+        dxfSyncBaseline=dxfSyncCopy(remote);lastCloudUpdatedAt=row?.updated_at||null;
+        dxfSyncApply(merged,user);
+        setSyncStatus('Místní změny čekají na uložení','busy');
+        dxfSyncRetry();return true;
+      }
+      // Compare-and-swap: a concurrent writer makes this update return no row.
+      const nextTimestamp=new Date(Math.max(Date.now(),Date.parse(row?.updated_at||'')+1||0)).toISOString();
+      merged.__syncV24={version:24};
+      let query;
+      if(row){
+        query=cloudClient.from('dxf_app_state').update({data:merged,updated_at:nextTimestamp}).eq('user_id',user.id);
+        query=row.updated_at?query.eq('updated_at',row.updated_at):query.is('updated_at',null);
+      }else query=cloudClient.from('dxf_app_state').insert({user_id:user.id,data:merged,updated_at:nextTimestamp});
+      const result=await query.select('data,updated_at').maybeSingle();
+      if(cloudUser?.id!==user.id||!cloudReady)return false;
+      if(result.error){if(result.error.code==='23505')continue;throw result.error}
+      if(!result.data)continue;
+      const acknowledged=result.data.data||merged;
+      // Edits made while the request was in flight remain pending.
+      const current=dxfSyncMerge(local,dxfSyncCopy(state),acknowledged);
+      dxfSyncBaseline=dxfSyncCopy(acknowledged);lastCloudUpdatedAt=result.data.updated_at;
+      dxfSyncApply(current,user);
+      if(!dxfSyncEqual(state,dxfSyncBaseline)){dxfSyncRetry();setSyncStatus('Další změny čekají na uložení','busy')}
+      else setSyncStatus('Uloženo online · V24','ok');
+      return true;
+    }
+    throw new Error('Souběžné ukládání; opakuji za chvíli.');
+  }catch(error){
+    console.warn('DXF synchronizace V24',error);
+    dxfSyncPersist(user);
+    setSyncStatus('Neuloženo online · místní kopie zachována','error');
+    if(notice)showCloudToast('Připojení se nepodařilo. Změny zůstaly v tomto zařízení a uložení zopakuji.');
+    dxfSyncRetry();return false;
+  }
+}
 async function loadCloudState(user,{silent=false}={}){
-  if(!user)return;if(!silent)setSyncStatus("Načítám data…","busy");
-  const {data,error}=await cloudClient.from("dxf_app_state").select("data,updated_at").eq("user_id",user.id).maybeSingle();
-  if(error){setSyncStatus("Chyba databáze","error");if(!silent)showCloudToast("Databázi se nepodařilo načíst. Lokální data zůstala zachovaná.");throw error}
-  if(data?.data){
-    dxfSafeSnapshot('před načtením cloudu');const before=dxfSafeCounts(state),remote=dxfSafeCounts(data.data);
-    cloudApplyingRemote=true;state=dxfSafeMergeState(state,data.data);localStorage.setItem(KEY,JSON.stringify(state));lastCloudUpdatedAt=data.updated_at||null;renderAll();cloudApplyingRemote=false;
-    if(remote.orders<before.orders)showCloudToast("Cloud měl méně objednávek. Data byla sloučena a místní objednávky zůstaly zachované.");
-    setSyncStatus("Data jsou bezpečně sloučená","ok");await pushCloudState(true);
-  }else{await pushCloudState(true);if(!silent)showCloudToast("Místní data byla poprvé nahrána do cloudu.")}
+  return dxfSyncEnqueue(async()=>{
+    if(dxfSyncOwner&&dxfSyncOwner!==user.id){
+      dxfSafeSnapshot('před změnou účtu');
+      state=dxfSafeParse(localStorage.getItem(KEY+':sync-cache:'+user.id),clone(defaults));
+    }
+    dxfSyncOwner=user.id;
+    dxfSyncBaseline=dxfSafeParse(localStorage.getItem(dxfSyncBaselineKey(user)));
+    if(!dxfSyncBaseline){
+      const row=await dxfSyncRead(user);
+      if(row?.data){
+        dxfSafeSnapshot('před přechodem na synchronizaci V24');
+        // Existing overlapping records come from the cloud, not an unversioned
+        // stale cache. On the first upgrade retain unique legacy records only.
+        const remote=normalizeCloudState(dxfSyncCopy(row.data));
+        let initial=dxfSyncCopy(remote);
+        if(!remote.__syncV24){
+          for(const key of ['orders','clients','moneyMovements','financeTransactions','rcServices','complaints','simpleNotes','customCatalog','calendarEvents','auditLog','stock']){
+            const list=Array.isArray(remote[key])?remote[key]:[];
+            const ids=new Set(list.map(x=>String(x.id)));
+            const extras=(state[key]||[]).filter(x=>x.id!=null&&!ids.has(String(x.id)));
+            if(extras.length)initial[key]=[...list,...dxfSyncCopy(extras)];
+          }
+        }
+        dxfSyncBaseline=dxfSyncCopy(remote);dxfSyncApply(initial,user);
+        if(!silent)showCloudToast('Načtena online data. Předchozí místní kopie je v bezpečnostní záloze.');
+      }else dxfSyncBaseline=clone(defaults);
+    }
+    if(!await dxfSyncRun(user,true,false))throw new Error('Cloud není dostupný');
+  });
 }
 async function pushCloudState(initial=false){
-  if(!cloudUser||!cloudReady||cloudApplyingRemote)return;clearTimeout(cloudSaveTimer);setSyncStatus("Bezpečně ukládám…","busy");
-  let remote=null;try{const read=await cloudClient.from("dxf_app_state").select("data,updated_at").eq("user_id",cloudUser.id).maybeSingle();if(!read.error)remote=read.data}catch(e){console.warn(e)}
-  if(remote?.data){const lc=dxfSafeCounts(state),rc=dxfSafeCounts(remote.data);state=dxfSafeMergeState(state,remote.data);localStorage.setItem(KEY,JSON.stringify(state));if(rc.orders>lc.orders&&!initial)showCloudToast("V cloudu byly další objednávky; zachoval jsem je.")}
-  state.__safe={...(state.__safe||{}),lastPushAt:new Date().toISOString(),version:22};
-  const {data,error}=await cloudClient.from("dxf_app_state").upsert({user_id:cloudUser.id,data:state},{onConflict:"user_id"}).select("updated_at").single();
-  if(error){setSyncStatus("Neuloženo – lokální kopie je v bezpečí","error");if(!initial)showCloudToast("Cloudové uložení selhalo. Lokální data zůstávají zachovaná.");return}
-  lastCloudUpdatedAt=data?.updated_at||new Date().toISOString();setSyncStatus("Bezpečně uloženo online","ok");
+  if(!cloudUser||!cloudReady||cloudApplyingRemote)return false;
+  clearTimeout(cloudSaveTimer);const user=cloudUser;
+  return dxfSyncEnqueue(()=>dxfSyncRun(user,true,!initial));
 }
-save=function(){dxfSafeSnapshot('před změnou');localStorage.setItem(KEY,JSON.stringify(state));renderAll();if(cloudReady&&!cloudApplyingRemote){clearTimeout(cloudSaveTimer);cloudSaveTimer=setTimeout(()=>pushCloudState(false),650)}};
-async function pullCloudIfNewer(showNotice=false){
-  if(!cloudUser||!cloudReady)return;setSyncStatus("Kontroluji změny…","busy");
-  const {data,error}=await cloudClient.from("dxf_app_state").select("data,updated_at").eq("user_id",cloudUser.id).maybeSingle();
-  if(error){setSyncStatus("Chyba připojení – lokální data zachována","error");return}
-  if(data?.data&&data?.updated_at&&(!lastCloudUpdatedAt||new Date(data.updated_at)>new Date(lastCloudUpdatedAt))){
-    dxfSafeSnapshot('před synchronizací');cloudApplyingRemote=true;state=dxfSafeMergeState(state,data.data);localStorage.setItem(KEY,JSON.stringify(state));lastCloudUpdatedAt=data.updated_at;renderAll();cloudApplyingRemote=false;if(showNotice)showCloudToast("Cloudová data byla bezpečně sloučena.")
+save=function(){
+  dxfSafeSnapshot('před změnou');renderAll();dxfSyncPersist(cloudUser);
+  if(cloudReady&&!cloudApplyingRemote){
+    setSyncStatus('Změny čekají na uložení','busy');clearTimeout(cloudSaveTimer);
+    cloudSaveTimer=setTimeout(()=>pushCloudState(false),650);
   }
-  setSyncStatus("Data jsou synchronizovaná","ok")
+};
+async function pullCloudIfNewer(showNotice=false){
+  if(!cloudUser||!cloudReady)return false;
+  const user=cloudUser;
+  return dxfSyncEnqueue(()=>dxfSyncRun(user,true,showNotice));
 }
-async function manualCloudRefresh(){await pullCloudIfNewer(true)}
-async function cloudLogout(){await pushCloudState(false);await cloudClient.auth.signOut()}
+async function manualCloudRefresh(){return pullCloudIfNewer(true)}
+async function cloudLogout(){
+  if(!await pushCloudState(false)){
+    showCloudToast('Odhlášení čeká: nejprve je potřeba uložit změny online.');return;
+  }
+  await cloudClient.auth.signOut();
+}
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='visible')pullCloudIfNewer(false);
+  else if(cloudReady)pushCloudState(true);
+});
+window.addEventListener('pageshow',()=>pullCloudIfNewer(false));
+setInterval(()=>{if(document.visibilityState==='visible')pullCloudIfNewer(false)},5000);
+
 
 async function enterCloudApp(session){
   if(!session?.user||cloudBootstrapRunning)return;
+  if(cloudReady&&cloudUser?.id===session.user.id&&authGate.style.display==="none")return;
   cloudBootstrapRunning=true;
   try{
     cloudUser=session.user;
@@ -2369,7 +2519,7 @@ async function enterCloudApp(session){
   }catch(error){
     // Přihlášení platí, ale databáze může ještě čekat na SQL.
     authGate.style.display="flex";
-    setAuthMessage("Přihlášení funguje, ale databázová tabulka není připravená. V Supabase spusť přiložený soubor supabase_setup.sql.","error");
+    setAuthMessage("Přihlášení funguje, ale online data se nepodařilo načíst. Zkontroluj připojení a obnov stránku. Místní kopie zůstala zachovaná.","error");
   }finally{
     cloudBootstrapRunning=false;
   }
@@ -2390,7 +2540,7 @@ cloudClient.auth.onAuthStateChange((event,session)=>{
     passwordRecoveryPanel.classList.remove("auth-hidden");
     return;
   }
-  if(event==="SIGNED_IN"&&session)enterCloudApp(session);
+  if(event==="SIGNED_IN"&&session)setTimeout(()=>enterCloudApp(session),0);
   if(event==="SIGNED_OUT")leaveCloudApp();
 });
 async function bootstrapCloud(){
